@@ -1,0 +1,18 @@
+<odoo>
+    <!-- Menu -->
+    <menuitem id="menu_pos_sync_root"
+              name="POS Sync"
+              parent="point_of_sale.menu_point_root" />
+
+    <!-- Action -->
+    <record id="action_pos_sync_page" model="ir.actions.client">
+        <field name="name">POS</field>
+        <field name="tag">pos_sync_page</field>
+    </record>
+
+    <!-- Link Menu -> Action -->
+    <menuitem id="menu_pos_sync_page"
+              name="Sync Page"
+              parent="menu_pos_sync_root"
+              action="action_pos_sync_page"/>
+</odoo>
