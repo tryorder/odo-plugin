@@ -1,0 +1,57 @@
+name: Deploy Order Connector
+
+on:
+  push:
+    branches: [main]
+
+env:
+  HOST: 116.203.36.121
+  USER: root
+  REMOTE_DIR: /opt/odoo18/odoo-addons/
+  ODOO_SERVICE: odoo18
+  ODOO_USER: odoo18
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create zip (exclude .git and .github)
+        run: |
+          mkdir -p /tmp/order_connector_build
+          rsync -a --exclude='.git' --exclude='.github' ./ /tmp/order_connector_build/
+          cd /tmp/order_connector_build
+          zip -r /tmp/order_connector.zip .
+          ls -lh /tmp/order_connector.zip
+
+      - name: SCP zip to remote server
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          scp /tmp/order_connector.zip "$USER@$HOST:/tmp/order_connector.zip"
+
+      - name: Unzip and restart Odoo on remote server
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          ssh "$USER@$HOST" "
+            set -e
+            echo '=== Extracting order_connector.zip to ${REMOTE_DIR}order_connector/ ==='
+            mkdir -p ${REMOTE_DIR}order_connector
+            rm -rf ${REMOTE_DIR}order_connector/*
+            unzip -o /tmp/order_connector.zip -d ${REMOTE_DIR}order_connector/
+            rm -f /tmp/order_connector.zip
+            echo '=== Setting permissions ==='
+            chown -R ${ODOO_USER}:${ODOO_USER} ${REMOTE_DIR}order_connector
+            echo '=== Restarting Odoo service (${ODOO_SERVICE}) ==='
+            systemctl restart ${ODOO_SERVICE}
+            echo '=== Status ==='
+            systemctl status ${ODOO_SERVICE} --no-pager -l | head -20
+            echo '=== Done ==='
+          "
