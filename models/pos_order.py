@@ -4,7 +4,6 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
-from odoo.addons.queue_job.job import job
 
 class PosOrder(models.Model):
     _inherit = "pos.order"
@@ -31,7 +30,6 @@ class PosOrder(models.Model):
 
         return res
 
-    @job
     def _send_status_webhook_async(self, order_id, old_state, new_state):
         """Async job to send webhook with retry support"""
         order = self.browse(order_id)
