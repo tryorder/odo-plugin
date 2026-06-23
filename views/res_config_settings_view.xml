@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-
 <odoo>
     <record id="res_config_settings_view_form_order_connector" model="ir.ui.view">
         <field name="name">order.connector.config.settings</field>
@@ -7,33 +6,54 @@
         <field name="priority" eval="95"/>
         <field name="inherit_id" ref="base.res_config_settings_view_form"/>
         <field name="arch" type="xml">
-
             <xpath expr="//form" position="inside">
-
-        <app data-string="Order Connector" string="Order Connector" name="order_connector">
-      
-            <!-- Insert inside the main sheet -->
-
-                <div class="app_settings_block" data-string="Order Connector Settings" string="Order Connector">
-                    <h2>Order Connector</h2>
-                    <block>
-
-                        <setting string="Tenant">
-                            <field name="connector_tenant" placeholder="dev196" />
+                <app data-string="Order Connector" string="Order Connector" name="order_connector"
+                     logo="/order_connector/static/description/icon.png">
+                    <block title="TryOrder Integration" name="order_connector_block">
+                        <setting string="Tenant"
+                                 help="Tenant identifier on the TryOrder platform (e.g. dev196).">
+                            <field name="connector_tenant" placeholder="dev196"/>
                         </setting>
-
-                        <setting string="Test mode">
-                            <field name="connector_test_mode"/>
+                        <setting string="API Key"
+                                 help="Shared secret the platform must send in the X-Api-Key header. Generate one, then click the icon to copy it into service-pos.">
+                            <field name="connector_api_key" widget="CopyClipboardChar" readonly="1"
+                                   placeholder="Click 'Generate new key' to create one"/>
+                            <button name="action_order_connector_generate_api_key" type="object"
+                                    string="Generate new key" class="btn-secondary"/>
                         </setting>
-
+                        <setting string="Gateway Base URL"
+                                 help="TryOrder API gateway base URL. Status webhooks are posted to &lt;base_url&gt;/webhook/odoo.">
+                            <field name="connector_gateway_base_url"
+                                   placeholder="https://order-api-gateway.karim-group.org"/>
+                        </setting>
+                        <setting string="Outbound Webhook Secret"
+                                 help="Optional secret sent as X-Webhook-Secret on outbound webhooks so the platform can verify them.">
+                            <field name="connector_webhook_secret" password="True"/>
+                        </setting>
                     </block>
-                </div>
-
-    
-
-            </app>
-
-                    </xpath>
+                </app>
+            </xpath>
         </field>
     </record>
+
+    <!-- Dedicated action + menu so the settings are always reachable,
+         independent of the General Settings tile rendering. -->
+    <record id="action_order_connector_settings" model="ir.actions.act_window">
+        <field name="name">Order Connector</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">inline</field>
+        <field name="context">{'module': 'order_connector'}</field>
+    </record>
+
+    <menuitem id="menu_order_connector_root"
+              name="Order Connector"
+              web_icon="order_connector,static/description/icon.png"
+              sequence="90"/>
+
+    <menuitem id="menu_order_connector_settings"
+              name="Settings"
+              parent="menu_order_connector_root"
+              action="action_order_connector_settings"
+              sequence="1"/>
 </odoo>
