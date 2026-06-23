@@ -35,4 +35,25 @@
             </xpath>
         </field>
     </record>
+
+    <!-- Dedicated action + menu so the settings are always reachable,
+         independent of the General Settings tile rendering. -->
+    <record id="action_order_connector_settings" model="ir.actions.act_window">
+        <field name="name">Order Connector</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">inline</field>
+        <field name="context">{'module': 'order_connector'}</field>
+    </record>
+
+    <menuitem id="menu_order_connector_root"
+              name="Order Connector"
+              web_icon="order_connector,static/description/icon.png"
+              sequence="90"/>
+
+    <menuitem id="menu_order_connector_settings"
+              name="Settings"
+              parent="menu_order_connector_root"
+              action="action_order_connector_settings"
+              sequence="1"/>
 </odoo>
