@@ -67,6 +67,14 @@ class OrderConnectorController(http.Controller):
             return {}
 
     @staticmethod
+    def _as_text(value):
+        """Coerce a value to a string. The platform may send localized names as
+        dicts ({'ar': '...', 'en': '...'}); pick en, then ar, then any value."""
+        if isinstance(value, dict):
+            return str(value.get('en') or value.get('ar') or next(iter(value.values()), '') or '')
+        return str(value) if value is not None else ''
+
+    @staticmethod
     def _strip_html(value):
         if not value:
             return ''
@@ -298,9 +306,9 @@ class OrderConnectorController(http.Controller):
             qty = float(item.get('qty') or 1)
             price = float(item.get('price') or template.list_price)
 
-            name_parts = [item.get('name') or template.name]
+            name_parts = [self._as_text(item.get('name')) or template.name]
             for modifier in item.get('modifiers') or []:
-                mod_name = modifier.get('name') or modifier.get('id')
+                mod_name = self._as_text(modifier.get('name')) or modifier.get('id')
                 mod_price = float(modifier.get('price') or 0)
                 # Fold modifier prices into the line so the order total matches.
                 price += mod_price * float(modifier.get('qty') or 1)
@@ -312,7 +320,7 @@ class OrderConnectorController(http.Controller):
                 'product_id': variant.id,
                 'product_uom_qty': qty,
                 'price_unit': price,
-                'name': '\n'.join(p for p in name_parts if p),
+                'name': '\n'.join(self._as_text(p) for p in name_parts if p),
             }))
 
         if not order_lines:
