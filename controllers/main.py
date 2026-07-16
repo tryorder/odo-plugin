@@ -277,7 +277,7 @@ class OrderConnectorController(http.Controller):
             _logger.exception("Order Connector create_order failed")
             return self._json({'success': False, 'error': str(exc)}, status=500)
 
-        name = (record.pos_reference or record.name) if kind == 'pos' else record.name
+        name = (record.name or record.pos_reference) if kind == 'pos' else record.name
         return self._json({
             'success': True,
             'order_id': str(record.id),
@@ -408,7 +408,9 @@ class OrderConnectorController(http.Controller):
         })
 
         # Register a payment so the order is marked paid (shows as a real order).
-        method = session.payment_method_ids[:1]
+        method = (session.payment_method_ids[:1]
+                  or config.payment_method_ids[:1]
+                  or env['pos.payment.method'].sudo().search([('company_id', '=', company.id)], limit=1))
         if method:
             try:
                 env['pos.payment'].sudo().create({
@@ -419,6 +421,19 @@ class OrderConnectorController(http.Controller):
                 pos_order.action_pos_order_paid()
             except Exception:  # noqa: BLE001 - keep the order even if it stays unpaid/draft
                 _logger.exception("Order Connector: could not mark pos order %s paid", pos_order.id)
+        else:
+            _logger.warning("Order Connector: no POS payment method for config %s; order stays draft", config.id)
+
+        # A draft pos.order keeps Odoo's default name "/"; assign the config's
+        # order-ref sequence so it has a proper reference.
+        if not pos_order.name or pos_order.name == '/':
+            ref = None
+            try:
+                if config.sequence_id:
+                    ref = config.sequence_id.sudo().next_by_id()
+            except Exception:  # noqa: BLE001
+                ref = None
+            pos_order.name = ref or ('Order/%s' % pos_order.id)
 
         return pos_order
 
