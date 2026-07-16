@@ -4,7 +4,7 @@ import logging
 import re
 import html
 
-from odoo import http
+from odoo import http, SUPERUSER_ID
 from odoo.http import request
 
 _logger = logging.getLogger(__name__)
@@ -269,7 +269,7 @@ class OrderConnectorController(http.Controller):
             return self._json({'success': False, 'error': 'order.items is required'}, status=422)
 
         try:
-            sale_order = self._build_sale_order(order, items)
+            record, kind = self._create_order(order, items)
         except ValueError as exc:
             _logger.warning("Order Connector create_order rejected: %s", exc)
             return self._json({'success': False, 'error': str(exc)}, status=422)
@@ -277,12 +277,150 @@ class OrderConnectorController(http.Controller):
             _logger.exception("Order Connector create_order failed")
             return self._json({'success': False, 'error': str(exc)}, status=500)
 
+        name = (record.pos_reference or record.name) if kind == 'pos' else record.name
         return self._json({
             'success': True,
-            'order_id': str(sale_order.id),
-            'order_name': sale_order.name,
-            'state': sale_order.state,
+            'order_id': str(record.id),
+            'order_name': name,
+            'state': record.state,
+            'kind': kind,
         })
+
+    def _create_order(self, order, items):
+        """Prefer a pos.order so the order shows in Point of Sale > Orders.
+        Falls back to a sale.order when no POS session is available or the
+        pos.order can't be built (wrapped in a savepoint so a failed attempt
+        rolls back cleanly and doesn't leave a half-created order)."""
+        session = None
+        try:
+            session = self._resolve_open_session(order.get('branch_id'))
+        except Exception:  # noqa: BLE001
+            _logger.exception("Order Connector: could not resolve a POS session")
+
+        if session:
+            try:
+                with request.env.cr.savepoint():
+                    return self._build_pos_order(order, items, session), 'pos'
+            except ValueError:
+                raise
+            except Exception:  # noqa: BLE001
+                _logger.exception("Order Connector: pos.order failed; falling back to sale.order")
+
+        return self._build_sale_order(order, items), 'sale'
+
+    def _resolve_open_session(self, branch_id):
+        """Return an opened pos.session for the branch's POS config, opening one
+        if needed. Returns None if none can be obtained (caller falls back)."""
+        env = request.env
+        config = None
+        if branch_id:
+            try:
+                cfg = env['pos.config'].sudo().browse(int(branch_id))
+                config = cfg if cfg.exists() else None
+            except (ValueError, TypeError):
+                config = None
+        if not config:
+            config = env['pos.config'].sudo().search([], limit=1)
+        if not config:
+            return None
+
+        session = env['pos.session'].sudo().search(
+            [('config_id', '=', config.id), ('state', '=', 'opened')],
+            limit=1, order='id desc')
+        if session:
+            return session
+
+        try:
+            session = env['pos.session'].sudo().create({'config_id': config.id, 'user_id': SUPERUSER_ID})
+            if session.state != 'opened':
+                session.action_pos_session_open()
+            return session if session.state == 'opened' else None
+        except Exception:  # noqa: BLE001
+            _logger.exception("Order Connector: could not open a POS session for config %s", config.id)
+            return None
+
+    def _build_pos_order(self, order, items, session):
+        env = request.env
+        ProductTemplate = env['product.template'].sudo()
+        config = session.config_id
+        company = config.company_id or env.company
+        currency = config.currency_id or company.currency_id
+        partner = self._resolve_partner(order.get('customer') or {})
+
+        lines = []
+        amount_total = 0.0
+        amount_tax = 0.0
+        for item in items:
+            template_id = item.get('product_id')
+            if not template_id:
+                continue
+            try:
+                template = ProductTemplate.browse(int(template_id))
+            except (ValueError, TypeError):
+                template = ProductTemplate.browse(False)
+            if not template.exists():
+                raise ValueError(f"Unknown product_id {template_id}")
+
+            variant = template.product_variant_id
+            qty = float(item.get('qty') or 1)
+            price = float(item.get('price') or template.list_price)
+            for modifier in item.get('modifiers') or []:
+                price += float(modifier.get('price') or 0) * float(modifier.get('qty') or 1)
+
+            taxes = variant.taxes_id
+            if taxes and company:
+                taxes = taxes.filtered(lambda t: t.company_id == company) or taxes
+            if taxes:
+                tax_res = taxes.compute_all(price, currency, qty, product=variant, partner=partner)
+                subtotal, subtotal_incl = tax_res['total_excluded'], tax_res['total_included']
+            else:
+                subtotal = subtotal_incl = price * qty
+
+            amount_total += subtotal_incl
+            amount_tax += subtotal_incl - subtotal
+
+            lines.append((0, 0, {
+                'product_id': variant.id,
+                'qty': qty,
+                'price_unit': price,
+                'price_subtotal': subtotal,
+                'price_subtotal_incl': subtotal_incl,
+                'discount': 0.0,
+                'tax_ids': [(6, 0, taxes.ids if taxes else [])],
+                'full_product_name': self._as_text(item.get('name')) or variant.name,
+            }))
+
+        if not lines:
+            raise ValueError('No resolvable products in order.items')
+
+        pos_order = env['pos.order'].sudo().create({
+            'session_id': session.id,
+            'company_id': company.id,
+            'partner_id': partner.id,
+            'pricelist_id': config.pricelist_id.id if config.pricelist_id else False,
+            'lines': lines,
+            'amount_tax': amount_tax,
+            'amount_total': amount_total,
+            'amount_paid': 0.0,
+            'amount_return': 0.0,
+            'connector_managed': True,
+            'connector_provider_order_id': order.get('provider_order_id') or '',
+        })
+
+        # Register a payment so the order is marked paid (shows as a real order).
+        method = session.payment_method_ids[:1]
+        if method:
+            try:
+                env['pos.payment'].sudo().create({
+                    'pos_order_id': pos_order.id,
+                    'amount': amount_total,
+                    'payment_method_id': method.id,
+                })
+                pos_order.action_pos_order_paid()
+            except Exception:  # noqa: BLE001 - keep the order even if it stays unpaid/draft
+                _logger.exception("Order Connector: could not mark pos order %s paid", pos_order.id)
+
+        return pos_order
 
     def _build_sale_order(self, order, items):
         env = request.env
