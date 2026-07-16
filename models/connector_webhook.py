@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
+import json
 import logging
 
 import requests
 
-from odoo import models
+import odoo
+from odoo import api, models, SUPERUSER_ID
 
 _logger = logging.getLogger(__name__)
 
@@ -13,8 +15,7 @@ class OrderConnectorWebhook(models.AbstractModel):
 
     Webhooks are posted to ``<gateway_base_url>/webhook/odoo``. Delivery is
     deferred to a post-commit hook so a slow/unreachable gateway never blocks
-    the POS or the order write. The hook closes over plain data only (URL,
-    headers, body) and never touches the ORM/cursor, which is safe after commit.
+    the POS or the order write. Every push is recorded in order.connector.log.
     """
 
     _name = 'order.connector.webhook'
@@ -40,24 +41,64 @@ class OrderConnectorWebhook(models.AbstractModel):
 
     @staticmethod
     def _deliver(url, headers, body):
+        """POST the event. Returns (status_code, ok, response_text). Never raises."""
+        status, ok, resp = 0, False, ''
         try:
             response = requests.post(url, json=body, headers=headers, timeout=10)
+            status, ok = response.status_code, response.ok
+            resp = (response.text or '')[:10000]
             response.raise_for_status()
             _logger.info("Order Connector webhook delivered: type=%s order_id=%s",
                          body.get('type'), (body.get('data') or {}).get('order_id'))
         except requests.exceptions.RequestException as exc:
+            resp = resp or str(exc)
             _logger.error("Order Connector webhook failed (%s): %s", url, exc)
+        return status, ok, resp
+
+    @staticmethod
+    def _log_vals(url, body, status, ok, resp):
+        return {
+            'direction': 'outbound',
+            'method': 'POST',
+            'endpoint': url,
+            'event_type': (body or {}).get('type'),
+            'status_code': status,
+            'success': ok,
+            'request_body': json.dumps(body, default=str, ensure_ascii=False)[:10000],
+            'response_body': (resp or '')[:10000],
+        }
 
     def notify(self, payload):
-        """Send immediately (best-effort). Never raises."""
-        built = self._build_request(payload)
-        if built:
-            self._deliver(*built)
-
-    def notify_after_commit(self, payload):
-        """Deliver the webhook once the current transaction commits."""
+        """Send immediately (best-effort) and log. Never raises."""
         built = self._build_request(payload)
         if not built:
             return
         url, headers, body = built
-        self.env.cr.postcommit.add(lambda: self._deliver(url, headers, body))
+        status, ok, resp = self._deliver(url, headers, body)
+        try:
+            self.env['order.connector.log'].sudo().create(self._log_vals(url, body, status, ok, resp))
+        except Exception:
+            _logger.exception('order_connector: outbound log write failed')
+
+    def notify_after_commit(self, payload):
+        """Deliver the webhook once the current transaction commits, then log it."""
+        built = self._build_request(payload)
+        if not built:
+            return
+        url, headers, body = built
+        dbname = self.env.cr.dbname
+
+        def _send():
+            status, ok, resp = OrderConnectorWebhook._deliver(url, headers, body)
+            # Fresh cursor: the request transaction has already committed here.
+            try:
+                registry = odoo.registry(dbname)
+                with registry.cursor() as cr:
+                    env = api.Environment(cr, SUPERUSER_ID, {})
+                    env['order.connector.log'].create(
+                        OrderConnectorWebhook._log_vals(url, body, status, ok, resp))
+                    cr.commit()
+            except Exception:
+                _logger.exception('order_connector: outbound log write failed')
+
+        self.env.cr.postcommit.add(_send)

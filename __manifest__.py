@@ -32,6 +32,8 @@ through a post-commit hook so they never block the POS.
     'auto_install': False,
     'images': ['static/description/icon.png'],
     'data': [
+        'security/ir.model.access.csv',
         'views/res_config_settings_view.xml',
+        'views/connector_log_views.xml',
     ],
 }

@@ -33,7 +33,30 @@ class OrderConnectorController(http.Controller):
 
     @staticmethod
     def _json(payload, status=200):
+        OrderConnectorController._log_inbound(payload, status)
         return request.make_json_response(payload, status=status)
+
+    @staticmethod
+    def _log_inbound(payload, status):
+        """Record every inbound endpoint hit in order.connector.log (best-effort)."""
+        try:
+            method = request.httprequest.method
+            req_body = None
+            if method in ('POST', 'PUT', 'PATCH'):
+                req_body = (request.httprequest.get_data(as_text=True) or '')[:10000]
+            success = payload.get('success') if isinstance(payload, dict) else (200 <= status < 300)
+            request.env['order.connector.log'].sudo().create({
+                'direction': 'inbound',
+                'method': method,
+                'endpoint': request.httprequest.path,
+                'status_code': status,
+                'success': bool(success),
+                'remote_addr': request.httprequest.remote_addr,
+                'request_body': req_body,
+                'response_body': json.dumps(payload, default=str, ensure_ascii=False)[:10000],
+            })
+        except Exception:
+            _logger.exception('order_connector: failed to write inbound log')
 
     @staticmethod
     def _body():
