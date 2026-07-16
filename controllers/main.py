@@ -125,18 +125,28 @@ class OrderConnectorController(http.Controller):
             })
         return result
 
+    def _base_url(self):
+        """Public base URL. Uses web.base.url (set to the https public host when
+        Odoo runs behind a TLS-terminating proxy) instead of host_url, which is
+        http on the internal proxy hop and 301-redirects (IPD-209)."""
+        params = request.env['ir.config_parameter'].sudo()
+        base = (params.get_param('web.base.url') or '').strip() or request.httprequest.host_url
+        return base.rstrip('/')
+
     def _catalog_items(self):
-        host = request.httprequest.host_url
+        base = self._base_url()
         products = request.env['product.template'].sudo().search([('available_in_pos', '=', True)])
         result = []
         for product in products:
             pos_categs = product.pos_categ_ids
             category_id = str(pos_categs[0].id) if pos_categs else None
             has_image = bool(product.image_512)
+            is_combo = product.type == 'combo'
             result.append({
                 '_id': str(product.id),
                 'remoteId': str(product.id),
                 'sku': product.default_code or '',
+                'type': product.type,
                 'name_en': self._tr(product, 'name', 'en_US'),
                 'name_ar': self._tr(product, 'name', 'ar_001'),
                 'description_en': self._strip_html(self._tr(product, 'description_sale', 'en_US')),
@@ -144,10 +154,38 @@ class OrderConnectorController(http.Controller):
                 'price': product.list_price,
                 'category': category_id,
                 'is_disabled': not product.active,
-                'image_url': f"{host}public/product/image/{product.id}" if has_image else None,
+                'image_url': f"{base}/public/product/image/{product.id}" if has_image else None,
                 'add_on': self._catalog_addons(product),
+                'combos': self._catalog_combos(product) if is_combo else [],
             })
         return result
+
+    def _catalog_combos(self, product):
+        """IPD-210: export Odoo combo groups/choices so combo options sync.
+
+        Odoo combo product -> combo_ids (product.combo, the choice groups) ->
+        combo_item_ids (product.combo.item) -> product_id + extra_price.
+        """
+        combos = []
+        for combo in getattr(product, 'combo_ids', []) or []:
+            items = []
+            for ci in getattr(combo, 'combo_item_ids', []) or []:
+                prod = getattr(ci, 'product_id', False)
+                tmpl_id = prod.product_tmpl_id.id if prod else None
+                items.append({
+                    'id': f"comboitem-{ci.id}",
+                    'product_id': str(tmpl_id) if tmpl_id else None,
+                    'name_en': self._tr(prod, 'name', 'en_US') if prod else '',
+                    'name_ar': self._tr(prod, 'name', 'ar_001') if prod else '',
+                    'extra_price': getattr(ci, 'extra_price', 0.0) or 0.0,
+                })
+            combos.append({
+                'id': f"combo-{combo.id}",
+                'name_en': self._tr(combo, 'name', 'en_US'),
+                'name_ar': self._tr(combo, 'name', 'ar_001'),
+                'items': items,
+            })
+        return combos
 
     def _catalog_addons(self, product):
         """Map Odoo product attributes -> modifier groups/options.
