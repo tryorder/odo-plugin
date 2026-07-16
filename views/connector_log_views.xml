@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_order_connector_log_tree" model="ir.ui.view">
+        <field name="name">order.connector.log.tree</field>
+        <field name="model">order.connector.log</field>
+        <field name="arch" type="xml">
+            <tree string="Order Connector Logs" create="false" edit="false" delete="false"
+                  decoration-danger="success == False" decoration-success="success == True">
+                <field name="create_date" string="When"/>
+                <field name="direction"/>
+                <field name="method"/>
+                <field name="endpoint"/>
+                <field name="event_type" optional="show"/>
+                <field name="status_code" string="Status"/>
+                <field name="success"/>
+                <field name="remote_addr" string="Remote IP" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_order_connector_log_form" model="ir.ui.view">
+        <field name="name">order.connector.log.form</field>
+        <field name="model">order.connector.log</field>
+        <field name="arch" type="xml">
+            <form string="Order Connector Log" create="false" edit="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="direction"/>
+                            <field name="method"/>
+                            <field name="endpoint"/>
+                            <field name="event_type"/>
+                        </group>
+                        <group>
+                            <field name="create_date" string="When"/>
+                            <field name="status_code"/>
+                            <field name="success"/>
+                            <field name="remote_addr"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Request Body">
+                            <field name="request_body" nolabel="1"/>
+                        </page>
+                        <page string="Response Body">
+                            <field name="response_body" nolabel="1"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_order_connector_log_search" model="ir.ui.view">
+        <field name="name">order.connector.log.search</field>
+        <field name="model">order.connector.log</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="endpoint"/>
+                <field name="remote_addr"/>
+                <field name="event_type"/>
+                <filter name="inbound" string="Inbound (endpoint hits)" domain="[('direction','=','inbound')]"/>
+                <filter name="outbound" string="Outbound (webhooks)" domain="[('direction','=','outbound')]"/>
+                <separator/>
+                <filter name="success" string="Success" domain="[('success','=',True)]"/>
+                <filter name="failed" string="Failed" domain="[('success','=',False)]"/>
+                <group expand="0" string="Group By">
+                    <filter name="group_direction" string="Direction" context="{'group_by':'direction'}"/>
+                    <filter name="group_endpoint" string="Endpoint" context="{'group_by':'endpoint'}"/>
+                    <filter name="group_status" string="Status" context="{'group_by':'status_code'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_order_connector_log" model="ir.actions.act_window">
+        <field name="name">Order Connector Logs</field>
+        <field name="res_model">order.connector.log</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{'create': False}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No logs yet</p>
+            <p>Inbound endpoint hits (ping, branches, catalog, orders, status) and
+               outbound webhook pushes to the platform will appear here.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_order_connector_logs"
+              name="Logs"
+              parent="menu_order_connector_root"
+              action="action_order_connector_log"
+              sequence="2"/>
+</odoo>
