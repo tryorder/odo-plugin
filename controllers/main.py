@@ -339,6 +339,24 @@ class OrderConnectorController(http.Controller):
             _logger.exception("Order Connector: could not open a POS session for config %s", config.id)
             return None
 
+    def _delivery_product(self):
+        """Find or create the shared 'Delivery Fee' service product used to
+        represent the order's delivery fee as a line."""
+        Product = request.env['product.product'].sudo()
+        prod = Product.search([('default_code', '=', 'ORDER_DELIVERY_FEE')], limit=1)
+        if not prod:
+            prod = Product.create({
+                'name': 'Delivery Fee',
+                'default_code': 'ORDER_DELIVERY_FEE',
+                'type': 'service',
+                'sale_ok': True,
+                'purchase_ok': False,
+                'available_in_pos': True,
+                'taxes_id': [(6, 0, [])],
+                'list_price': 0.0,
+            })
+        return prod
+
     def _build_pos_order(self, order, items, session):
         env = request.env
         ProductTemplate = env['product.template'].sudo()
@@ -392,6 +410,22 @@ class OrderConnectorController(http.Controller):
 
         if not lines:
             raise ValueError('No resolvable products in order.items')
+
+        # Delivery fee as its own (untaxed) line so it counts toward the total.
+        delivery_fee = float(order.get('delivery_fee') or 0)
+        if delivery_fee:
+            dp = self._delivery_product()
+            lines.append((0, 0, {
+                'product_id': dp.id,
+                'qty': 1,
+                'price_unit': delivery_fee,
+                'price_subtotal': delivery_fee,
+                'price_subtotal_incl': delivery_fee,
+                'discount': 0.0,
+                'tax_ids': [(6, 0, [])],
+                'full_product_name': dp.name,
+            }))
+            amount_total += delivery_fee
 
         pos_order = env['pos.order'].sudo().create({
             'session_id': session.id,
@@ -478,6 +512,18 @@ class OrderConnectorController(http.Controller):
 
         if not order_lines:
             raise ValueError('No resolvable products in order.items')
+
+        # Delivery fee as its own (untaxed) line so it counts toward the total.
+        delivery_fee = float(order.get('delivery_fee') or 0)
+        if delivery_fee:
+            dp = self._delivery_product()
+            order_lines.append((0, 0, {
+                'product_id': dp.id,
+                'product_uom_qty': 1,
+                'price_unit': delivery_fee,
+                'name': dp.name,
+                'tax_id': [(6, 0, [])],
+            }))
 
         note_bits = []
         if order.get('order_type'):
