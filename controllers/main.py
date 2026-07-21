@@ -386,6 +386,30 @@ class OrderConnectorController(http.Controller):
             })
         return prod
 
+    def _pos_payment_method(self, session, payment_type):
+        """Pick the POS payment method matching the order's payment type:
+        a cash method for offline/cash, otherwise a non-cash (card) method.
+        Falls back to any available method."""
+        methods = session.payment_method_ids or session.config_id.payment_method_ids
+        if not methods:
+            methods = request.env['pos.payment.method'].sudo().search(
+                [('company_id', '=', session.company_id.id)])
+        if not methods:
+            return request.env['pos.payment.method'].sudo().browse(False)
+
+        def is_cash(m):
+            mtype = getattr(m, 'type', None)
+            if mtype:
+                return mtype == 'cash'
+            return bool(getattr(m, 'is_cash_count', False))
+
+        want_cash = (payment_type or '').lower() in ('offline', 'cash', 'cod', 'cash_on_delivery')
+        cash = methods.filtered(is_cash)
+        non_cash = methods - cash
+        if want_cash:
+            return (cash or methods)[:1]
+        return (non_cash or methods)[:1]
+
     def _build_pos_order(self, order, items, session):
         env = request.env
         ProductTemplate = env['product.template'].sudo()
@@ -496,10 +520,9 @@ class OrderConnectorController(http.Controller):
 
         pos_order = env['pos.order'].sudo().create(pos_vals)
 
-        # Register a payment so the order is marked paid (shows as a real order).
-        method = (session.payment_method_ids[:1]
-                  or config.payment_method_ids[:1]
-                  or env['pos.payment.method'].sudo().search([('company_id', '=', company.id)], limit=1))
+        # Register a payment so the order is marked paid (shows as a real order),
+        # matching the order's payment type (cash for offline, card otherwise).
+        method = self._pos_payment_method(session, order.get('payment_type'))
         if method:
             try:
                 env['pos.payment'].sudo().create({
