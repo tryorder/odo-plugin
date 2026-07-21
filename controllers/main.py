@@ -688,17 +688,53 @@ class OrderConnectorController(http.Controller):
 
         body = self._body()
         status = (body.get('status') or '').lower()
-        sale_order = request.env['sale.order'].sudo().browse(order_id)
-        if not sale_order.exists():
-            return self._json({'success': False, 'error': 'Order not found'}, status=404)
+        env = request.env
 
-        if status in ('canceled', 'cancelled', 'rejected'):
-            sale_order._action_cancel() if hasattr(sale_order, '_action_cancel') else sale_order.action_cancel()
-            return self._json({'success': True, 'order_id': str(order_id), 'state': sale_order.state})
+        pos_order = env['pos.order'].sudo().browse(order_id)
+        if pos_order.exists():
+            return self._apply_status(pos_order, status, is_pos=True)
 
-        if status in ('confirmed', 'accepted') and sale_order.state in ('draft', 'sent'):
-            sale_order.action_confirm()
-            return self._json({'success': True, 'order_id': str(order_id), 'state': sale_order.state})
+        sale_order = env['sale.order'].sudo().browse(order_id)
+        if sale_order.exists():
+            return self._apply_status(sale_order, status, is_pos=False)
 
-        return self._json({'success': True, 'order_id': str(order_id), 'state': sale_order.state,
-                           'note': f'No transition for status "{status}"'})
+        return self._json({'success': False, 'error': 'Order not found'}, status=404)
+
+    def _apply_status(self, order, status, is_pos):
+        # Always record the latest platform status in the order note so
+        # intermediate statuses (pending/preparing/ready/...) are reflected;
+        # terminal statuses also transition the order state.
+        self._record_status_note(order, status)
+        try:
+            if status in ('canceled', 'cancelled', 'rejected'):
+                if is_pos:
+                    if order.state != 'cancel':
+                        order.write({'state': 'cancel'})
+                else:
+                    order._action_cancel() if hasattr(order, '_action_cancel') else order.action_cancel()
+            elif status in ('completed', 'delivered', 'done', 'picked_up'):
+                if is_pos and order.state not in ('done', 'invoiced'):
+                    if hasattr(order, 'action_pos_order_done'):
+                        order.action_pos_order_done()
+                    else:
+                        order.write({'state': 'done'})
+            elif status in ('confirmed', 'accepted') and not is_pos and order.state in ('draft', 'sent'):
+                order.action_confirm()
+        except Exception:  # noqa: BLE001 - status is recorded in the note regardless
+            _logger.exception("Order Connector: could not transition order %s to %s", order.id, status)
+
+        return self._json({'success': True, 'order_id': str(order.id),
+                           'state': order.state, 'status': status})
+
+    def _record_status_note(self, order, status):
+        note_field = self._first_field(order._name, ['general_note', 'note'])
+        if not note_field or not status:
+            return
+        try:
+            existing = order[note_field] or ''
+            label = 'Status: %s' % status
+            if existing.rstrip().endswith(label):
+                return  # don't duplicate the same trailing status
+            order[note_field] = existing + ('\n' if existing else '') + label
+        except Exception:  # noqa: BLE001
+            _logger.exception("Order Connector: could not record status note on %s", order.id)
