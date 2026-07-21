@@ -339,6 +339,16 @@ class OrderConnectorController(http.Controller):
             _logger.exception("Order Connector: could not open a POS session for config %s", config.id)
             return None
 
+    @staticmethod
+    def _first_field(model, candidates):
+        """Return the first of `candidates` that exists on `model` (note field
+        names differ across Odoo versions), else None."""
+        fields = request.env[model].sudo()._fields
+        for name in candidates:
+            if name in fields:
+                return name
+        return None
+
     def _delivery_product(self):
         """Find or create the shared 'Delivery Fee' service product used to
         represent the order's delivery fee as a line."""
@@ -364,6 +374,7 @@ class OrderConnectorController(http.Controller):
         company = config.company_id or env.company
         currency = config.currency_id or company.currency_id
         partner = self._resolve_partner(order.get('customer') or {})
+        line_note_field = self._first_field('pos.order.line', ['customer_note', 'note'])
 
         lines = []
         amount_total = 0.0
@@ -397,7 +408,7 @@ class OrderConnectorController(http.Controller):
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
 
-            lines.append((0, 0, {
+            line_vals = {
                 'product_id': variant.id,
                 'qty': qty,
                 'price_unit': price,
@@ -406,7 +417,10 @@ class OrderConnectorController(http.Controller):
                 'discount': 0.0,
                 'tax_ids': [(6, 0, taxes.ids if taxes else [])],
                 'full_product_name': self._as_text(item.get('name')) or variant.name,
-            }))
+            }
+            if line_note_field and item.get('note'):
+                line_vals[line_note_field] = self._as_text(item.get('note'))
+            lines.append((0, 0, line_vals))
 
         if not lines:
             raise ValueError('No resolvable products in order.items')
@@ -427,7 +441,7 @@ class OrderConnectorController(http.Controller):
             }))
             amount_total += delivery_fee
 
-        pos_order = env['pos.order'].sudo().create({
+        pos_vals = {
             'session_id': session.id,
             'company_id': company.id,
             'partner_id': partner.id,
@@ -439,7 +453,13 @@ class OrderConnectorController(http.Controller):
             'amount_return': 0.0,
             'connector_managed': True,
             'connector_provider_order_id': order.get('provider_order_id') or '',
-        })
+        }
+        order_note = self._as_text(order.get('note'))
+        note_field = self._first_field('pos.order', ['general_note', 'note'])
+        if note_field and order_note:
+            pos_vals[note_field] = order_note
+
+        pos_order = env['pos.order'].sudo().create(pos_vals)
 
         # Register a payment so the order is marked paid (shows as a real order).
         method = (session.payment_method_ids[:1]
