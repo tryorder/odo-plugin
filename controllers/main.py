@@ -367,6 +367,25 @@ class OrderConnectorController(http.Controller):
             })
         return prod
 
+    def _discount_product(self):
+        """Find or create the shared 'Discount' service product used to
+        represent an order-level discount (coupon/points/wallet) as a
+        negative line."""
+        Product = request.env['product.product'].sudo()
+        prod = Product.search([('default_code', '=', 'ORDER_DISCOUNT')], limit=1)
+        if not prod:
+            prod = Product.create({
+                'name': 'Discount',
+                'default_code': 'ORDER_DISCOUNT',
+                'type': 'service',
+                'sale_ok': True,
+                'purchase_ok': False,
+                'available_in_pos': True,
+                'taxes_id': [(6, 0, [])],
+                'list_price': 0.0,
+            })
+        return prod
+
     def _build_pos_order(self, order, items, session):
         env = request.env
         ProductTemplate = env['product.template'].sudo()
@@ -440,6 +459,22 @@ class OrderConnectorController(http.Controller):
                 'full_product_name': dp.name,
             }))
             amount_total += delivery_fee
+
+        # Order-level discount (coupon/points/wallet) as a negative line.
+        discount = float(order.get('discount') or 0)
+        if discount:
+            dpp = self._discount_product()
+            lines.append((0, 0, {
+                'product_id': dpp.id,
+                'qty': 1,
+                'price_unit': -discount,
+                'price_subtotal': -discount,
+                'price_subtotal_incl': -discount,
+                'discount': 0.0,
+                'tax_ids': [(6, 0, [])],
+                'full_product_name': dpp.name,
+            }))
+            amount_total -= discount
 
         pos_vals = {
             'session_id': session.id,
@@ -542,6 +577,18 @@ class OrderConnectorController(http.Controller):
                 'product_uom_qty': 1,
                 'price_unit': delivery_fee,
                 'name': dp.name,
+                'tax_id': [(6, 0, [])],
+            }))
+
+        # Order-level discount (coupon/points/wallet) as a negative line.
+        discount = float(order.get('discount') or 0)
+        if discount:
+            dpp = self._discount_product()
+            order_lines.append((0, 0, {
+                'product_id': dpp.id,
+                'product_uom_qty': 1,
+                'price_unit': -discount,
+                'name': dpp.name,
                 'tax_id': [(6, 0, [])],
             }))
 
