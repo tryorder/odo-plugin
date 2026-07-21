@@ -402,6 +402,30 @@ class OrderConnectorController(http.Controller):
             })
         return prod
 
+    def _discount_components(self, order):
+        """Normalize the order-level discounts into a list of
+        (label, amount) pairs. Prefers the itemized `discounts` breakdown
+        (coupon / wallet balance / loyalty points) so each shows as its own
+        line; falls back to the single aggregate `discount` for older callers."""
+        components = []
+        breakdown = order.get('discounts')
+        if isinstance(breakdown, (list, tuple)) and breakdown:
+            for component in breakdown:
+                if not isinstance(component, dict):
+                    continue
+                amount = float(component.get('amount') or 0)
+                if not amount:
+                    continue
+                label = self._as_text(component.get('label')) or 'Discount'
+                components.append((label, amount))
+            if components:
+                return components
+
+        discount = float(order.get('discount') or 0)
+        if discount:
+            components.append(('Discount', discount))
+        return components
+
     def _pos_payment_method(self, session, payment_type):
         """Pick the POS payment method matching the order's payment type:
         a cash method for offline/cash, otherwise a non-cash (card) method.
@@ -500,21 +524,22 @@ class OrderConnectorController(http.Controller):
             }))
             amount_total += delivery_fee
 
-        # Order-level discount (coupon/points/wallet) as a negative line.
-        discount = float(order.get('discount') or 0)
-        if discount:
+        # Order-level discounts (coupon / wallet balance / loyalty points) each
+        # as its own labeled negative line so they are reflected in the order
+        # details and reduce the total.
+        for label, amount in self._discount_components(order):
             dpp = self._discount_product()
             lines.append((0, 0, {
                 'product_id': dpp.id,
                 'qty': 1,
-                'price_unit': -discount,
-                'price_subtotal': -discount,
-                'price_subtotal_incl': -discount,
+                'price_unit': -amount,
+                'price_subtotal': -amount,
+                'price_subtotal_incl': -amount,
                 'discount': 0.0,
                 'tax_ids': [(6, 0, [])],
-                'full_product_name': dpp.name,
+                'full_product_name': label,
             }))
-            amount_total -= discount
+            amount_total -= amount
 
         pos_vals = {
             'session_id': session.id,
@@ -622,15 +647,15 @@ class OrderConnectorController(http.Controller):
                 'tax_id': [(6, 0, [])],
             }))
 
-        # Order-level discount (coupon/points/wallet) as a negative line.
-        discount = float(order.get('discount') or 0)
-        if discount:
+        # Order-level discounts (coupon / wallet balance / loyalty points) each
+        # as its own labeled negative line so they are reflected in the total.
+        for label, amount in self._discount_components(order):
             dpp = self._discount_product()
             order_lines.append((0, 0, {
                 'product_id': dpp.id,
                 'product_uom_qty': 1,
-                'price_unit': -discount,
-                'name': dpp.name,
+                'price_unit': -amount,
+                'name': label,
                 'tax_id': [(6, 0, [])],
             }))
 
