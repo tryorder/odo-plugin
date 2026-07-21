@@ -340,6 +340,22 @@ class OrderConnectorController(http.Controller):
             return None
 
     @staticmethod
+    def _order_type_label(order_type):
+        """Readable label for the order type (delivery / pickup / dinein / ...)."""
+        if not order_type:
+            return ''
+        key = str(order_type).lower().replace('-', '_').replace(' ', '_')
+        return {
+            'delivery': 'Delivery',
+            'pickup': 'Pickup',
+            'pick_up': 'Pickup',
+            'dinein': 'Dine In',
+            'dine_in': 'Dine In',
+            'drivethru': 'Drive Thru',
+            'drive_thru': 'Drive Thru',
+        }.get(key, str(order_type).replace('_', ' ').title())
+
+    @staticmethod
     def _first_field(model, candidates):
         """Return the first of `candidates` that exists on `model` (note field
         names differ across Odoo versions), else None."""
@@ -514,6 +530,9 @@ class OrderConnectorController(http.Controller):
             'connector_provider_order_id': order.get('provider_order_id') or '',
         }
         order_note = self._as_text(order.get('note'))
+        type_label = self._order_type_label(order.get('order_type'))
+        if type_label:
+            order_note = ('Order Type: %s\n%s' % (type_label, order_note)).strip()
         note_field = self._first_field('pos.order', ['general_note', 'note'])
         if note_field and order_note:
             pos_vals[note_field] = order_note
@@ -617,7 +636,7 @@ class OrderConnectorController(http.Controller):
 
         note_bits = []
         if order.get('order_type'):
-            note_bits.append(f"Type: {order['order_type']}")
+            note_bits.append(f"Order Type: {self._order_type_label(order.get('order_type'))}")
         if order.get('note'):
             note_bits.append(str(order['note']))
         if order.get('payment_type'):
