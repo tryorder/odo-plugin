@@ -438,6 +438,7 @@ class OrderConnectorController(http.Controller):
         lines = []
         amount_total = 0.0
         amount_tax = 0.0
+        item_notes = []
         for item in items:
             template_id = item.get('product_id')
             if not template_id:
@@ -467,6 +468,14 @@ class OrderConnectorController(http.Controller):
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
 
+            display_name = self._as_text(item.get('name')) or variant.name
+            line_note = self._as_text(item.get('note')) if item.get('note') else ''
+            if line_note:
+                # The pos.order backend form shows neither customer_note nor a
+                # per-line note column, so collect notes to append to the
+                # order's General Notes where they are actually visible.
+                item_notes.append('%s: %s' % (display_name, line_note))
+
             line_vals = {
                 'product_id': variant.id,
                 'qty': qty,
@@ -475,10 +484,10 @@ class OrderConnectorController(http.Controller):
                 'price_subtotal_incl': subtotal_incl,
                 'discount': 0.0,
                 'tax_ids': [(6, 0, taxes.ids if taxes else [])],
-                'full_product_name': self._as_text(item.get('name')) or variant.name,
+                'full_product_name': display_name,
             }
-            if line_note_field and item.get('note'):
-                line_vals[line_note_field] = self._as_text(item.get('note'))
+            if line_note_field and line_note:
+                line_vals[line_note_field] = line_note
             lines.append((0, 0, line_vals))
 
         if not lines:
@@ -533,6 +542,9 @@ class OrderConnectorController(http.Controller):
         type_label = self._order_type_label(order.get('order_type'))
         if type_label:
             order_note = ('Order Type: %s\n%s' % (type_label, order_note)).strip()
+        if item_notes:
+            order_note = ('%s\n\nItem Notes:\n- %s' % (
+                order_note, '\n- '.join(item_notes))).strip()
         note_field = self._first_field('pos.order', ['general_note', 'note'])
         if note_field and order_note:
             pos_vals[note_field] = order_note
