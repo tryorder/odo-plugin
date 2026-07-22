@@ -467,6 +467,14 @@ class OrderConnectorController(http.Controller):
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
 
+            line_note = self._as_text(item.get('note')) if item.get('note') else ''
+            # Fold the item note into the line's display name too: the pos.order
+            # backend form shows full_product_name but not customer_note, so a
+            # note-only-in-customer_note stays invisible there.
+            display_name = self._as_text(item.get('name')) or variant.name
+            if line_note:
+                display_name = '%s\nNote: %s' % (display_name, line_note)
+
             line_vals = {
                 'product_id': variant.id,
                 'qty': qty,
@@ -475,10 +483,10 @@ class OrderConnectorController(http.Controller):
                 'price_subtotal_incl': subtotal_incl,
                 'discount': 0.0,
                 'tax_ids': [(6, 0, taxes.ids if taxes else [])],
-                'full_product_name': self._as_text(item.get('name')) or variant.name,
+                'full_product_name': display_name,
             }
-            if line_note_field and item.get('note'):
-                line_vals[line_note_field] = self._as_text(item.get('note'))
+            if line_note_field and line_note:
+                line_vals[line_note_field] = line_note
             lines.append((0, 0, line_vals))
 
         if not lines:
