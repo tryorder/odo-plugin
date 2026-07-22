@@ -462,6 +462,7 @@ class OrderConnectorController(http.Controller):
         lines = []
         amount_total = 0.0
         amount_tax = 0.0
+        item_notes = []
         for item in items:
             template_id = item.get('product_id')
             if not template_id:
@@ -492,12 +493,14 @@ class OrderConnectorController(http.Controller):
             amount_tax += subtotal_incl - subtotal
 
             line_note = self._as_text(item.get('note')) if item.get('note') else ''
-            # Fold the item note into the line's display name too: the pos.order
-            # backend form shows full_product_name but not customer_note, so a
-            # note-only-in-customer_note stays invisible there.
             display_name = self._as_text(item.get('name')) or variant.name
             if line_note:
+                # The pos.order backend form shows neither customer_note nor a
+                # per-line note column, so also collect notes to append to the
+                # order's General Notes where they are actually visible.
                 display_name = '%s\nNote: %s' % (display_name, line_note)
+                item_notes.append('%s: %s' % (
+                    self._as_text(item.get('name')) or variant.name, line_note))
 
             line_vals = {
                 'product_id': variant.id,
@@ -566,6 +569,9 @@ class OrderConnectorController(http.Controller):
         type_label = self._order_type_label(order.get('order_type'))
         if type_label:
             order_note = ('Order Type: %s\n%s' % (type_label, order_note)).strip()
+        if item_notes:
+            order_note = ('%s\n\nItem Notes:\n- %s' % (
+                order_note, '\n- '.join(item_notes))).strip()
         note_field = self._first_field('pos.order', ['general_note', 'note'])
         if note_field and order_note:
             pos_vals[note_field] = order_note
