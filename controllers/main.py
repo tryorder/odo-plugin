@@ -383,16 +383,52 @@ class OrderConnectorController(http.Controller):
             })
         return prod
 
-    def _discount_product(self):
-        """Find or create the shared 'Discount' service product used to
-        represent an order-level discount (coupon/points/wallet) as a
-        negative line."""
+    # Normalize the raw discount labels the platform sends into the names
+    # merchants expect to see in Odoo.
+    _DISCOUNT_LABELS = {
+        'discount': 'Order Discount',
+        'order discount': 'Order Discount',
+        'coupon': 'Coupon Discount',
+        'coupon discount': 'Coupon Discount',
+        'wallet': 'Wallet Discount',
+        'wallet balance': 'Wallet Discount',
+        'wallet discount': 'Wallet Discount',
+        'points': 'Loyalty Points Discount',
+        'loyalty': 'Loyalty Points Discount',
+        'loyalty points': 'Loyalty Points Discount',
+        'loyalty points discount': 'Loyalty Points Discount',
+    }
+
+    def _discount_label(self, label):
+        """Map a raw discount label to the display name shown in Odoo, e.g.
+        'Wallet Balance' -> 'Wallet Discount'. Unknown labels get a
+        ' Discount' suffix unless they already carry one."""
+        text = self._as_text(label).strip()
+        if not text:
+            return 'Order Discount'
+        key = text.lower()
+        if key in self._DISCOUNT_LABELS:
+            return self._DISCOUNT_LABELS[key]
+        return text if key.endswith('discount') else '%s Discount' % text
+
+    def _discount_product(self, label=None):
+        """Find or create the service product used to represent an order-level
+        discount as a negative line. Each discount type gets its own product so
+        the backend Products list (which shows the product, not the line label)
+        reads e.g. 'Coupon Discount' / 'Wallet Discount' instead of a single
+        generic 'Order Discount' for every source."""
+        display = self._discount_label(label)
+        if display == 'Order Discount':
+            code = 'ORDER_DISCOUNT'  # keep the original code for back-compat
+        else:
+            slug = re.sub(r'[^A-Z0-9]+', '_', display.upper()).strip('_')
+            code = 'ORDER_DISCOUNT_%s' % slug
         Product = request.env['product.product'].sudo()
-        prod = Product.search([('default_code', '=', 'ORDER_DISCOUNT')], limit=1)
+        prod = Product.search([('default_code', '=', code)], limit=1)
         if not prod:
             prod = Product.create({
-                'name': 'Discount',
-                'default_code': 'ORDER_DISCOUNT',
+                'name': display,
+                'default_code': code,
                 'type': 'service',
                 'sale_ok': True,
                 'purchase_ok': False,
@@ -539,7 +575,7 @@ class OrderConnectorController(http.Controller):
         # as its own labeled negative line so they are reflected in the order
         # details and reduce the total.
         for label, amount in self._discount_components(order):
-            dpp = self._discount_product()
+            dpp = self._discount_product(label)
             lines.append((0, 0, {
                 'product_id': dpp.id,
                 'qty': 1,
@@ -548,7 +584,7 @@ class OrderConnectorController(http.Controller):
                 'price_subtotal_incl': -amount,
                 'discount': 0.0,
                 'tax_ids': [(6, 0, [])],
-                'full_product_name': label,
+                'full_product_name': dpp.name,
             }))
             amount_total -= amount
 
@@ -664,12 +700,12 @@ class OrderConnectorController(http.Controller):
         # Order-level discounts (coupon / wallet balance / loyalty points) each
         # as its own labeled negative line so they are reflected in the total.
         for label, amount in self._discount_components(order):
-            dpp = self._discount_product()
+            dpp = self._discount_product(label)
             order_lines.append((0, 0, {
                 'product_id': dpp.id,
                 'product_uom_qty': 1,
                 'price_unit': -amount,
-                'name': label,
+                'name': dpp.name,
                 'tax_id': [(6, 0, [])],
             }))
 
