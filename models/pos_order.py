@@ -15,6 +15,13 @@ class PosOrder(models.Model):
         string="TryOrder Order Code",
         copy=False,
     )
+    # Latest fulfilment status pushed from the platform (accepted / ready /
+    # delivered / ...). Shown as a colored badge in the order header.
+    connector_status = fields.Char(
+        string="Order Status",
+        copy=False,
+        index=True,
+    )
 
     def write(self, vals):
         old_states = {order.id: order.state for order in self}

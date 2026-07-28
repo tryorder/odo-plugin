@@ -744,6 +744,13 @@ class OrderConnectorController(http.Controller):
         # intermediate statuses (pending/preparing/ready/...) are reflected;
         # terminal statuses also transition the order state.
         self._record_status_note(order, status)
+        # Store the latest status on its own field so it can render as a
+        # colored badge in the order header (pos.order only).
+        if status and 'connector_status' in order._fields:
+            try:
+                order.connector_status = status
+            except Exception:  # noqa: BLE001 - never fail the status update on this
+                _logger.exception("Order Connector: could not set connector_status on %s", order.id)
         try:
             if status in ('canceled', 'cancelled', 'rejected'):
                 if is_pos:
