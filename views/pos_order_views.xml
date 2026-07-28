@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Show the platform fulfilment status as a colored badge in the order
+         header, alongside the standard New / Paid / Posted statusbar. -->
+    <record id="view_pos_order_form_connector_status" model="ir.ui.view">
+        <field name="name">pos.order.form.connector.status</field>
+        <field name="model">pos.order</field>
+        <field name="inherit_id" ref="point_of_sale.view_pos_pos_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <field name="connector_status"
+                       widget="badge"
+                       invisible="not connector_status"
+                       decoration-info="connector_status in ('pending','accepted','confirmed','preparing')"
+                       decoration-warning="connector_status in ('ready','on_the_way','dispatched','out_for_delivery')"
+                       decoration-success="connector_status in ('delivered','completed','picked_up','done')"
+                       decoration-danger="connector_status in ('canceled','cancelled','rejected','failed')"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
