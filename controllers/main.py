@@ -555,7 +555,11 @@ class OrderConnectorController(http.Controller):
 
             variant = template.product_variant_id
             qty = float(item.get('qty') or 1)
-            price = float(item.get('price') or template.list_price)
+            # Use the price the platform sends, including 0 (e.g. a free-product
+            # coupon). Only fall back to the Odoo list price when no price is
+            # sent at all — `or` would wrongly treat 0 as missing.
+            item_price = item.get('price')
+            price = float(item_price) if item_price is not None else template.list_price
             for modifier in item.get('modifiers') or []:
                 price += float(modifier.get('price') or 0) * float(modifier.get('qty') or 1)
 
@@ -706,7 +710,11 @@ class OrderConnectorController(http.Controller):
 
             variant = template.product_variant_id
             qty = float(item.get('qty') or 1)
-            price = float(item.get('price') or template.list_price)
+            # Use the price the platform sends, including 0 (e.g. a free-product
+            # coupon). Only fall back to the Odoo list price when no price is
+            # sent at all — `or` would wrongly treat 0 as missing.
+            item_price = item.get('price')
+            price = float(item_price) if item_price is not None else template.list_price
 
             name_parts = [self._as_text(item.get('name')) or template.name]
             for modifier in item.get('modifiers') or []:
