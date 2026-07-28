@@ -133,15 +133,58 @@ class OrderConnectorController(http.Controller):
         auth = self._check_auth()
         if auth:
             return auth
+        # When a branch (pos.config) is given, only export the products and
+        # categories available in that branch, so each mapped branch receives
+        # its own menu instead of every product in the database.
+        config = self._resolve_catalog_config(kw.get('branch_id'))
         return self._json({
             'success': True,
-            'categories': self._catalog_categories(),
-            'items': self._catalog_items(),
+            'categories': self._catalog_categories(config),
+            'items': self._catalog_items(config),
             'sizes': [],
         })
 
-    def _catalog_categories(self):
-        categories = request.env['pos.category'].sudo().search([])
+    def _resolve_catalog_config(self, branch_id):
+        """Return the pos.config for branch_id, or None (unfiltered)."""
+        if not branch_id:
+            return None
+        try:
+            config = request.env['pos.config'].sudo().browse(int(branch_id))
+        except (ValueError, TypeError):
+            return None
+        return config if config.exists() else None
+
+    def _config_category_ids(self, config):
+        """The pos.category ids available at this branch, expanded to include
+        child categories. Returns None when the branch does not restrict
+        categories (all categories available)."""
+        if not config or not getattr(config, 'limit_categories', False):
+            return None
+        available = getattr(config, 'iface_available_categ_ids', False)
+        if not available:
+            return None
+        return request.env['pos.category'].sudo().search(
+            [('id', 'child_of', available.ids)]).ids
+
+    def _product_domain(self, config):
+        """Search domain for the products exported to a branch: available in
+        POS, in the branch's company, and within its category limits."""
+        domain = [('available_in_pos', '=', True)]
+        if config:
+            company = config.company_id
+            if company:
+                domain += ['|', ('company_id', '=', False), ('company_id', '=', company.id)]
+            categ_ids = self._config_category_ids(config)
+            if categ_ids is not None:
+                domain.append(('pos_categ_ids', 'in', categ_ids))
+        return domain
+
+    def _catalog_categories(self, config=None):
+        domain = []
+        categ_ids = self._config_category_ids(config)
+        if categ_ids is not None:
+            domain = [('id', 'in', categ_ids)]
+        categories = request.env['pos.category'].sudo().search(domain)
         result = []
         for cat in categories:
             result.append({
@@ -164,9 +207,9 @@ class OrderConnectorController(http.Controller):
         base = (params.get_param('web.base.url') or '').strip() or request.httprequest.host_url
         return base.rstrip('/')
 
-    def _catalog_items(self):
+    def _catalog_items(self, config=None):
         base = self._base_url()
-        products = request.env['product.template'].sudo().search([('available_in_pos', '=', True)])
+        products = request.env['product.template'].sudo().search(self._product_domain(config))
         result = []
         for product in products:
             pos_categs = product.pos_categ_ids
