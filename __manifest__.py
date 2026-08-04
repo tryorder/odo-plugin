@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Order Connector',
-    'version': '2.0',
+    # Odoo Apps Store requires the version to be prefixed with the Odoo
+    # series: <series>.<major>.<minor>.<patch>.<build>.
+    'version': '18.0.2.0.0',
     'category': 'Sales/Point of Sale',
     'summary': 'Two-way integration bridge between Odoo and the TryOrder platform',
     'description': """
@@ -24,12 +26,16 @@ No external OCA dependency (queue_job) is required: outbound webhooks are sent
 through a post-commit hook so they never block the POS.
 """,
     'author': 'TryOrder',
+    'maintainer': 'TryOrder',
     'website': 'https://tryorder.com',
+    'support': 'support@tryorder.com',
     'license': 'LGPL-3',
     'depends': ['base', 'product', 'point_of_sale', 'sale_management', 'pos_sale'],
     'installable': True,
     'application': True,
     'auto_install': False,
+    # First image is the store listing banner; add screenshots here as you
+    # produce them (static/description/screenshot_*.png).
     'images': ['static/description/icon.png'],
     'data': [
         'security/ir.model.access.csv',
