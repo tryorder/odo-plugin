@@ -7,7 +7,7 @@
         <field name="inherit_id" ref="base.res_config_settings_view_form"/>
         <field name="arch" type="xml">
             <xpath expr="//form" position="inside">
-                <app data-string="Order Connector" string="Order Connector" name="order_connector"
+                <app data-string="TryOrder" string="TryOrder" name="order_connector"
                      logo="/order_connector/static/description/icon.png">
                     <block title="TryOrder Integration" name="order_connector_block">
                         <setting string="Tenant"
@@ -39,7 +39,7 @@
     <!-- Dedicated action + menu so the settings are always reachable,
          independent of the General Settings tile rendering. -->
     <record id="action_order_connector_settings" model="ir.actions.act_window">
-        <field name="name">Order Connector</field>
+        <field name="name">TryOrder</field>
         <field name="res_model">res.config.settings</field>
         <field name="view_mode">form</field>
         <field name="target">inline</field>
@@ -47,7 +47,7 @@
     </record>
 
     <menuitem id="menu_order_connector_root"
-              name="Order Connector"
+              name="TryOrder"
               web_icon="order_connector,static/description/icon.png"
               sequence="90"/>
 

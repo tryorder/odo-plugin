@@ -1,6 +1,6 @@
-===============
-Order Connector
-===============
+========
+TryOrder
+========
 
 .. |badge_license| image:: https://img.shields.io/badge/license-LGPL--3-blue.png
     :target: https://www.gnu.org/licenses/lgpl-3.0-standalone.html
@@ -11,7 +11,7 @@ Order Connector
 Two-way integration bridge between Odoo and the `TryOrder <https://tryorder.com>`_
 ordering platform.
 
-Order Connector turns your Odoo instance into a channel for TryOrder: your POS
+TryOrder turns your Odoo instance into a channel for TryOrder: your POS
 products and branches are exported to TryOrder, and orders placed on TryOrder are
 created back in Odoo Point of Sale — with prices, discounts, notes, payment type
 and live status kept in sync both ways.
