@@ -1,0 +1,103 @@
+<section class="oe_container">
+  <div class="oe_row oe_spaced">
+    <div class="oe_span12">
+      <h2 class="oe_slogan" style="color:#875A7B;">TryOrder</h2>
+      <h3 class="oe_slogan">Two-way integration between Odoo and the TryOrder ordering platform</h3>
+      <p class="oe_mt32" style="text-align:center; max-width:820px; margin:0 auto;">
+        TryOrder turns your Odoo instance into a first-class channel for the
+        TryOrder platform. Your Odoo products and POS branches flow out to TryOrder,
+        and orders placed on TryOrder flow back into Odoo Point of Sale — with prices,
+        discounts, notes, payment type and live status kept in sync both ways.
+      </p>
+      <p class="oe_mt16" style="text-align:center;">
+        <strong>Requires a TryOrder account.</strong> This module is the Odoo side of the
+        integration and does nothing on its own.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="oe_container oe_dark">
+  <div class="oe_row oe_spaced">
+    <div class="oe_span12">
+      <h2 class="oe_slogan">What it does</h2>
+    </div>
+    <div class="oe_span6">
+      <h3 class="oe_slogan" style="text-align:left;">Menu &amp; catalog sync</h3>
+      <ul>
+        <li>Exports POS categories, products, variants, modifiers and combos.</li>
+        <li><strong>Branch-aware:</strong> each mapped POS (pos.config) receives only its own
+            products, honoring company and <em>Limit Categories</em> settings.</li>
+        <li>Multilingual names (English / Arabic) and product images.</li>
+      </ul>
+    </div>
+    <div class="oe_span6">
+      <h3 class="oe_slogan" style="text-align:left;">Order sync</h3>
+      <ul>
+        <li>Creates a real <code>pos.order</code> so orders appear in Point of Sale.</li>
+        <li>Line-level notes, order notes, order type and payment method (cash/card).</li>
+        <li>Itemized discounts as their own lines: Coupon, Wallet, Loyalty Points.</li>
+        <li>Free-product coupons sync at price 0.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="oe_container">
+  <div class="oe_row oe_spaced">
+    <div class="oe_span6">
+      <h3 class="oe_slogan" style="text-align:left;">Live status, both ways</h3>
+      <ul>
+        <li>Status pushed from TryOrder is shown as a colored badge on the order.</li>
+        <li>Odoo state changes (paid / done / cancelled) are pushed back to TryOrder
+            via a non-blocking post-commit webhook.</li>
+      </ul>
+    </div>
+    <div class="oe_span6">
+      <h3 class="oe_slogan" style="text-align:left;">Built-in observability</h3>
+      <ul>
+        <li>Every inbound API call and outbound webhook is recorded in a log you can
+            browse inside Odoo.</li>
+        <li>API-key protected endpoints; no external OCA dependency required.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="oe_container oe_dark">
+  <div class="oe_row oe_spaced">
+    <div class="oe_span12">
+      <h2 class="oe_slogan">HTTP API</h2>
+      <p style="text-align:center;">All endpoints are protected by a shared API key sent in the
+        <code>X-Api-Key</code> header (configured under <em>Settings &#8250; Order Connector</em>).</p>
+      <pre style="max-width:760px; margin:0 auto; background:#fff; border:1px solid #eee; padding:16px;">
+GET  /order_connector/ping                    health / credential check
+GET  /order_connector/branches                list POS branches (pos.config)
+GET  /order_connector/catalog?branch_id=..    branch-specific menu
+POST /order_connector/orders                  create an order in Odoo
+PUT  /order_connector/orders/&lt;id&gt;/status      update / cancel an order</pre>
+    </div>
+  </div>
+</section>
+
+<section class="oe_container">
+  <div class="oe_row oe_spaced">
+    <div class="oe_span12">
+      <h2 class="oe_slogan">Setup</h2>
+      <ol style="max-width:760px; margin:0 auto;">
+        <li>Install the module.</li>
+        <li>Open <em>Settings &#8250; Order Connector</em> and set your API key (shared with TryOrder).</li>
+        <li>In TryOrder, connect the Odoo account and map each branch to a POS.</li>
+        <li>Sync the menu and start receiving orders.</li>
+      </ol>
+      <p class="oe_mt32" style="text-align:center;">
+        Compatible with Odoo 18 Community. Depends only on standard modules
+        (Point of Sale, Sales).
+      </p>
+      <p style="text-align:center;">
+        Support: <a href="mailto:support@tryorder.com">support@tryorder.com</a> &#183;
+        <a href="https://tryorder.com">tryorder.com</a>
+      </p>
+    </div>
+  </div>
+</section>
