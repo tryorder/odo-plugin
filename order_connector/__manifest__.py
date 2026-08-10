@@ -14,7 +14,7 @@ Connect your Odoo Point of Sale to the TryOrder ordering platform.
 
 TryOrder turns your Odoo instance into a channel for the TryOrder platform: your
 POS products and branches are exported to TryOrder, and orders placed on TryOrder
-are created back in Odoo Point of Sale — with prices, discounts, notes, payment
+are created back in Odoo Point of Sale - with prices, discounts, notes, payment
 type and live status kept in sync both ways.
 
 Requires a TryOrder account. This module is the Odoo side of the integration and

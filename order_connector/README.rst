@@ -13,7 +13,7 @@ ordering platform.
 
 TryOrder turns your Odoo instance into a channel for TryOrder: your POS
 products and branches are exported to TryOrder, and orders placed on TryOrder are
-created back in Odoo Point of Sale — with prices, discounts, notes, payment type
+created back in Odoo Point of Sale - with prices, discounts, notes, payment type
 and live status kept in sync both ways.
 
 .. note::
@@ -24,17 +24,17 @@ and live status kept in sync both ways.
 Features
 ========
 
-* **Menu / catalog sync** — POS categories, products, variants, modifiers and
+* **Menu / catalog sync** - POS categories, products, variants, modifiers and
   combos, in English and Arabic, with images.
-* **Branch-aware menus** — each mapped POS (``pos.config``) receives only its own
+* **Branch-aware menus** - each mapped POS (``pos.config``) receives only its own
   products, honoring the branch company and *Limit Categories* settings.
-* **Order sync** — creates a real ``pos.order`` (visible in Point of Sale) with
+* **Order sync** - creates a real ``pos.order`` (visible in Point of Sale) with
   line notes, order notes, order type and the correct payment method.
-* **Itemized discounts** — Coupon, Wallet and Loyalty Points each appear as their
+* **Itemized discounts** - Coupon, Wallet and Loyalty Points each appear as their
   own labeled line; free-product coupons sync at price 0.
-* **Live status, both ways** — status pushed from TryOrder shows as a colored badge
+* **Live status, both ways** - status pushed from TryOrder shows as a colored badge
   on the order; Odoo state changes are pushed back via a non-blocking webhook.
-* **Observability** — every inbound call and outbound webhook is logged inside Odoo.
+* **Observability** - every inbound call and outbound webhook is logged inside Odoo.
 
 HTTP API
 ========
@@ -74,4 +74,4 @@ LGPL-3. See ``LICENSE``.
 Support
 =======
 
-support@tryorder.com — https://tryorder.com
+support@tryorder.com - https://tryorder.com
