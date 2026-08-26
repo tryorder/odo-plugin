@@ -529,18 +529,40 @@ class OrderConnectorController(http.Controller):
             return (cash or methods)[:1]
         return (non_cash or methods)[:1]
 
-    def _addon_product(self, name):
+    @staticmethod
+    def _localized(value, lang):
+        """Pick one language out of a localized value ({en,ar} dict)."""
+        if isinstance(value, dict):
+            return str(value.get(lang) or '')
+        return ''
+
+    def _addon_product(self, name_value):
         """Find or create a POS service product for an order add-on / combo
-        option, so each selected option shows as its own order line."""
-        name = (self._as_text(name) or 'Add-on').strip()
-        slug = re.sub(r'[^A-Z0-9]+', '_', name.upper()).strip('_')[:40] or 'GENERIC'
-        code = 'ORDER_ADDON_%s' % slug
+        option, so each selected option shows as its own order line.
+
+        The product is named in both English and Arabic so the order line
+        reads in the user's language, and carries NO internal reference so the
+        line shows a clean product name (not "[ORDER_ADDON_x]") — the backend
+        order list renders the product's display name, not the line label."""
+        en = self._localized(name_value, 'en') or self._as_text(name_value)
+        ar = self._localized(name_value, 'ar')
+        display = (en or ar or 'Add-on').strip()
+
         Product = request.env['product.product'].sudo()
-        prod = Product.search([('default_code', '=', code)], limit=1)
+        # Reuse our own add-on products (service / POS / no reference), matched
+        # by their English name. The default_code filter keeps us from touching
+        # real catalog products (which normally carry a reference).
+        prod = Product.with_context(lang='en_US').search([
+            ('name', '=', display),
+            ('type', '=', 'service'),
+            ('available_in_pos', '=', True),
+            ('sale_ok', '=', True),
+            ('purchase_ok', '=', False),
+            ('default_code', '=', False),
+        ], limit=1)
         if not prod:
-            prod = Product.create({
-                'name': name,
-                'default_code': code,
+            prod = Product.with_context(lang='en_US').create({
+                'name': display,
                 'type': 'service',
                 'sale_ok': True,
                 'purchase_ok': False,
@@ -548,6 +570,11 @@ class OrderConnectorController(http.Controller):
                 'taxes_id': [(6, 0, [])],
                 'list_price': 0.0,
             })
+        if ar and ar != display:
+            try:
+                prod.with_context(lang='ar_001').write({'name': ar})
+            except Exception:  # noqa: BLE001 - translation is best-effort
+                _logger.exception("Order Connector: could not set Arabic add-on name")
         return prod
 
     def _tax_amounts(self, taxes, currency, partner, unit_price, qty, product=None):
@@ -630,11 +657,11 @@ class OrderConnectorController(http.Controller):
             for modifier in item.get('modifiers') or []:
                 mod_price = float(modifier.get('price') or 0)
                 mod_qty = float(modifier.get('qty') or 1) * qty
-                mod_name = self._as_text(modifier.get('name')) or 'Add-on'
+                mod_name_value = modifier.get('name')
                 mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
                 amount_total += mod_incl
                 amount_tax += mod_incl - mod_sub
-                addon = self._addon_product(mod_name)
+                addon = self._addon_product(mod_name_value)
                 lines.append((0, 0, {
                     'product_id': addon.id,
                     'qty': mod_qty,
@@ -643,7 +670,7 @@ class OrderConnectorController(http.Controller):
                     'price_subtotal_incl': mod_incl,
                     'discount': 0.0,
                     'tax_ids': [(6, 0, taxes.ids if taxes else [])],
-                    'full_product_name': mod_name,
+                    'full_product_name': self._as_text(mod_name_value) or addon.name,
                 }))
 
         if not lines:
