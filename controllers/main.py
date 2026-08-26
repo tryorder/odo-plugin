@@ -529,6 +529,34 @@ class OrderConnectorController(http.Controller):
             return (cash or methods)[:1]
         return (non_cash or methods)[:1]
 
+    def _addon_product(self, name):
+        """Find or create a POS service product for an order add-on / combo
+        option, so each selected option shows as its own order line."""
+        name = (self._as_text(name) or 'Add-on').strip()
+        slug = re.sub(r'[^A-Z0-9]+', '_', name.upper()).strip('_')[:40] or 'GENERIC'
+        code = 'ORDER_ADDON_%s' % slug
+        Product = request.env['product.product'].sudo()
+        prod = Product.search([('default_code', '=', code)], limit=1)
+        if not prod:
+            prod = Product.create({
+                'name': name,
+                'default_code': code,
+                'type': 'service',
+                'sale_ok': True,
+                'purchase_ok': False,
+                'available_in_pos': True,
+                'taxes_id': [(6, 0, [])],
+                'list_price': 0.0,
+            })
+        return prod
+
+    def _tax_amounts(self, taxes, currency, partner, unit_price, qty, product=None):
+        """Return (subtotal_excl, subtotal_incl) for a line, applying `taxes`."""
+        if taxes:
+            res = taxes.compute_all(unit_price, currency, qty, product=product, partner=partner)
+            return res['total_excluded'], res['total_included']
+        return unit_price * qty, unit_price * qty
+
     def _build_pos_order(self, order, items, session):
         env = request.env
         ProductTemplate = env['product.template'].sudo()
@@ -560,18 +588,14 @@ class OrderConnectorController(http.Controller):
             # sent at all — `or` would wrongly treat 0 as missing.
             item_price = item.get('price')
             price = float(item_price) if item_price is not None else template.list_price
-            for modifier in item.get('modifiers') or []:
-                price += float(modifier.get('price') or 0) * float(modifier.get('qty') or 1)
 
             taxes = variant.taxes_id
             if taxes and company:
                 taxes = taxes.filtered(lambda t: t.company_id == company) or taxes
-            if taxes:
-                tax_res = taxes.compute_all(price, currency, qty, product=variant, partner=partner)
-                subtotal, subtotal_incl = tax_res['total_excluded'], tax_res['total_included']
-            else:
-                subtotal = subtotal_incl = price * qty
 
+            # Main product line at its own price (add-ons are their own lines
+            # below, not folded into this price).
+            subtotal, subtotal_incl = self._tax_amounts(taxes, currency, partner, price, qty, variant)
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
 
@@ -598,6 +622,29 @@ class OrderConnectorController(http.Controller):
             if line_note_field and line_note:
                 line_vals[line_note_field] = line_note
             lines.append((0, 0, line_vals))
+
+            # Selected add-ons / combo options as their own lines so they show
+            # in the order with their quantity and price. They carry the parent
+            # product's taxes, so the order total is unchanged versus folding
+            # the add-on price into the main line.
+            for modifier in item.get('modifiers') or []:
+                mod_price = float(modifier.get('price') or 0)
+                mod_qty = float(modifier.get('qty') or 1) * qty
+                mod_name = self._as_text(modifier.get('name')) or 'Add-on'
+                mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
+                amount_total += mod_incl
+                amount_tax += mod_incl - mod_sub
+                addon = self._addon_product(mod_name)
+                lines.append((0, 0, {
+                    'product_id': addon.id,
+                    'qty': mod_qty,
+                    'price_unit': mod_price,
+                    'price_subtotal': mod_sub,
+                    'price_subtotal_incl': mod_incl,
+                    'discount': 0.0,
+                    'tax_ids': [(6, 0, taxes.ids if taxes else [])],
+                    'full_product_name': mod_name,
+                }))
 
         if not lines:
             raise ValueError('No resolvable products in order.items')
