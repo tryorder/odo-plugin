@@ -536,16 +536,51 @@ class OrderConnectorController(http.Controller):
             return str(value.get(lang) or '')
         return ''
 
-    def _addon_product(self, name_value):
+    def _addon_names_from_id(self, mod_id):
+        """Resolve an add-on's English & Arabic names from its Odoo source,
+        using Odoo's own translations so the option matches the UI language
+        (the same way the main product line does). The catalog exports add-on
+        ids as 'ptav-<id>' (a product attribute value) and combo items as
+        'comboitem-<id>'; a plain integer is treated as a product id.
+        Returns (en, ar) with '' when unresolved."""
+        mod_id = self._as_text(mod_id)
+        if not mod_id:
+            return '', ''
+        env = request.env
+        try:
+            m = re.match(r'^ptav-(\d+)$', mod_id)
+            if m:
+                rec = env['product.template.attribute.value'].sudo().browse(int(m.group(1)))
+                if rec.exists():
+                    return self._tr(rec, 'name', 'en_US'), self._tr(rec, 'name', 'ar_001')
+            m = re.match(r'^comboitem-(\d+)$', mod_id)
+            if m:
+                ci = env['product.combo.item'].sudo().browse(int(m.group(1)))
+                if ci.exists() and ci.product_id:
+                    return self._tr(ci.product_id, 'name', 'en_US'), self._tr(ci.product_id, 'name', 'ar_001')
+            if mod_id.isdigit():
+                prod = env['product.product'].sudo().browse(int(mod_id))
+                if prod.exists():
+                    return self._tr(prod, 'name', 'en_US'), self._tr(prod, 'name', 'ar_001')
+        except Exception:  # noqa: BLE001 - fall back to the order-supplied name
+            _logger.exception("Order Connector: could not resolve add-on name for %s", mod_id)
+        return '', ''
+
+    def _addon_product(self, name_value, mod_id=None):
         """Find or create a POS service product for an order add-on / combo
         option, so each selected option shows as its own order line.
 
         The product is named in both English and Arabic so the order line
         reads in the user's language, and carries NO internal reference so the
         line shows a clean product name (not "[ORDER_ADDON_x]") — the backend
-        order list renders the product's display name, not the line label."""
-        en = self._localized(name_value, 'en') or self._as_text(name_value)
-        ar = self._localized(name_value, 'ar')
+        order list renders the product's display name, not the line label.
+
+        Names come from Odoo's own translations (resolved from the option id)
+        when available, so they localize even when the order only carried one
+        language; otherwise the order-supplied name is used."""
+        en_odoo, ar_odoo = self._addon_names_from_id(mod_id)
+        en = en_odoo or self._localized(name_value, 'en') or self._as_text(name_value)
+        ar = ar_odoo or self._localized(name_value, 'ar')
         display = (en or ar or 'Add-on').strip()
 
         Product = request.env['product.product'].sudo()
@@ -661,7 +696,7 @@ class OrderConnectorController(http.Controller):
                 mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
                 amount_total += mod_incl
                 amount_tax += mod_incl - mod_sub
-                addon = self._addon_product(mod_name_value)
+                addon = self._addon_product(mod_name_value, modifier.get('id'))
                 lines.append((0, 0, {
                     'product_id': addon.id,
                     'qty': mod_qty,
