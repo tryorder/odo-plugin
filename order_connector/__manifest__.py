@@ -3,7 +3,7 @@
     'name': 'TryOrder',
     # Odoo Apps Store requires the version to be prefixed with the Odoo
     # series: <series>.<major>.<minor>.<patch>.<build>.
-    'version': '18.0.2.0.0',
+    'version': '17.0.2.0.0',
     'category': 'Sales/Point of Sale',
     'summary': 'Two-way POS integration between Odoo and the TryOrder ordering platform',
     'description': """
@@ -63,6 +63,5 @@ through a post-commit hook so they never block the POS.
         'security/ir.model.access.csv',
         'views/res_config_settings_view.xml',
         'views/connector_log_views.xml',
-        'views/pos_order_views.xml',
     ],
 }
