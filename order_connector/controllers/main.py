@@ -86,6 +86,31 @@ class OrderConnectorController(http.Controller):
     def _tr(record, field, lang):
         return record.with_context(lang=lang)[field]
 
+    @staticmethod
+    def _ar_code():
+        """The Arabic language code this database actually has installed.
+
+        Odoo ships Arabic as 'ar_001', but a database may carry a country
+        variant instead ('ar_SA', 'ar_EG', ...) or no Arabic at all. Odoo 17+
+        raises "Invalid language code" for a language that is not installed,
+        which fails the whole request, so never hardcode it. Returns None when
+        the database has no Arabic.
+        """
+        try:
+            installed = [code for code, _name in request.env['res.lang'].sudo().get_installed()]
+        except Exception:  # noqa: BLE001 - a language lookup must never break a request
+            _logger.exception("Order Connector: could not list installed languages")
+            return None
+        if 'ar_001' in installed:
+            return 'ar_001'
+        return next((code for code in installed if code == 'ar' or code.startswith('ar_')), None)
+
+    @classmethod
+    def _tr_ar(cls, record, field):
+        """Arabic value of `field`, falling back to the English one when the
+        database has no Arabic installed, so the platform still gets a name."""
+        return cls._tr(record, field, cls._ar_code() or 'en_US')
+
     # ------------------------------------------------------------------ #
     # GET /order_connector/ping
     # ------------------------------------------------------------------ #
@@ -198,7 +223,7 @@ class OrderConnectorController(http.Controller):
                 '_id': str(cat.id),
                 'remoteId': str(cat.id),
                 'name_en': self._tr(cat, 'name', 'en_US'),
-                'name_ar': self._tr(cat, 'name', 'ar_001'),
+                'name_ar': self._tr_ar(cat, 'name'),
                 'description_en': '',
                 'description_ar': '',
                 'parent_id': str(cat.parent_id.id) if cat.parent_id else None,
@@ -232,9 +257,9 @@ class OrderConnectorController(http.Controller):
                 'sku': product.default_code or '',
                 'type': product.type,
                 'name_en': self._tr(product, 'name', 'en_US'),
-                'name_ar': self._tr(product, 'name', 'ar_001'),
+                'name_ar': self._tr_ar(product, 'name'),
                 'description_en': self._strip_html(self._tr(product, 'description_sale', 'en_US')),
-                'description_ar': self._strip_html(self._tr(product, 'description_sale', 'ar_001')),
+                'description_ar': self._strip_html(self._tr_ar(product, 'description_sale')),
                 'price': product.list_price,
                 'category': category_id,
                 'is_disabled': not product.active,
@@ -260,13 +285,13 @@ class OrderConnectorController(http.Controller):
                     'id': f"comboitem-{ci.id}",
                     'product_id': str(tmpl_id) if tmpl_id else None,
                     'name_en': self._tr(prod, 'name', 'en_US') if prod else '',
-                    'name_ar': self._tr(prod, 'name', 'ar_001') if prod else '',
+                    'name_ar': self._tr_ar(prod, 'name') if prod else '',
                     'extra_price': getattr(ci, 'extra_price', 0.0) or 0.0,
                 })
             combos.append({
                 'id': f"combo-{combo.id}",
                 'name_en': self._tr(combo, 'name', 'en_US'),
-                'name_ar': self._tr(combo, 'name', 'ar_001'),
+                'name_ar': self._tr_ar(combo, 'name'),
                 'items': items,
             })
         return combos
@@ -284,7 +309,7 @@ class OrderConnectorController(http.Controller):
                 '_id': f"attr-{attribute.id}",
                 'remoteId': f"attr-{attribute.id}",
                 'name_en': self._tr(attribute, 'name', 'en_US'),
-                'name_ar': self._tr(attribute, 'name', 'ar_001'),
+                'name_ar': self._tr_ar(attribute, 'name'),
                 'description_en': '',
                 'description_ar': '',
                 # Standard Odoo attribute lines have no "required" flag; default to optional.
@@ -299,7 +324,7 @@ class OrderConnectorController(http.Controller):
                         '_id': f"ptav-{ptav.id}",
                         'remoteId': f"ptav-{ptav.id}",
                         'name_en': self._tr(ptav, 'name', 'en_US'),
-                        'name_ar': self._tr(ptav, 'name', 'ar_001'),
+                        'name_ar': self._tr_ar(ptav, 'name'),
                         'price': ptav.price_extra,
                         'category': f"attr-{attribute.id}",
                     },
@@ -562,16 +587,16 @@ class OrderConnectorController(http.Controller):
             if m:
                 rec = env['product.template.attribute.value'].sudo().browse(int(m.group(1)))
                 if rec.exists():
-                    return self._tr(rec, 'name', 'en_US'), self._tr(rec, 'name', 'ar_001')
+                    return self._tr(rec, 'name', 'en_US'), self._tr_ar(rec, 'name')
             m = re.match(r'^comboitem-(\d+)$', mod_id)
             if m:
                 ci = env['product.combo.item'].sudo().browse(int(m.group(1)))
                 if ci.exists() and ci.product_id:
-                    return self._tr(ci.product_id, 'name', 'en_US'), self._tr(ci.product_id, 'name', 'ar_001')
+                    return self._tr(ci.product_id, 'name', 'en_US'), self._tr_ar(ci.product_id, 'name')
             if mod_id.isdigit():
                 prod = env['product.product'].sudo().browse(int(mod_id))
                 if prod.exists():
-                    return self._tr(prod, 'name', 'en_US'), self._tr(prod, 'name', 'ar_001')
+                    return self._tr(prod, 'name', 'en_US'), self._tr_ar(prod, 'name')
         except Exception:  # noqa: BLE001 - fall back to the order-supplied name
             _logger.exception("Order Connector: could not resolve add-on name for %s", mod_id)
         return '', ''
@@ -615,9 +640,10 @@ class OrderConnectorController(http.Controller):
                 'taxes_id': [(6, 0, [])],
                 'list_price': 0.0,
             })
-        if ar and ar != display:
+        ar_lang = self._ar_code()
+        if ar and ar_lang and ar != display:
             try:
-                prod.with_context(lang='ar_001').write({'name': ar})
+                prod.with_context(lang=ar_lang).write({'name': ar})
             except Exception:  # noqa: BLE001 - translation is best-effort
                 _logger.exception("Order Connector: could not set Arabic add-on name")
         return prod
