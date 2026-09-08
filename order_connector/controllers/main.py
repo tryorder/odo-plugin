@@ -154,6 +154,11 @@ class OrderConnectorController(http.Controller):
             return None
         return config if config.exists() else None
 
+    def _pos_categ_field(self):
+        """POS-category field on product.template: `pos_categ_ids` (many2many)
+        on Odoo 17+, `pos_categ_id` (many2one) on Odoo 16."""
+        return self._first_field('product.template', ['pos_categ_ids', 'pos_categ_id'])
+
     def _config_category_ids(self, config):
         """The pos.category ids available at this branch, expanded to include
         child categories. Returns None when the branch does not restrict
@@ -176,7 +181,9 @@ class OrderConnectorController(http.Controller):
                 domain += ['|', ('company_id', '=', False), ('company_id', '=', company.id)]
             categ_ids = self._config_category_ids(config)
             if categ_ids is not None:
-                domain.append(('pos_categ_ids', 'in', categ_ids))
+                field = self._pos_categ_field()
+                if field:
+                    domain.append((field, 'in', categ_ids))
         return domain
 
     def _catalog_categories(self, config=None):
@@ -210,9 +217,12 @@ class OrderConnectorController(http.Controller):
     def _catalog_items(self, config=None):
         base = self._base_url()
         products = request.env['product.template'].sudo().search(self._product_domain(config))
+        categ_field = self._pos_categ_field()
         result = []
         for product in products:
-            pos_categs = product.pos_categ_ids
+            # pos_categ_ids (m2m, Odoo 17+) or pos_categ_id (m2o, Odoo 16);
+            # both index to the first category.
+            pos_categs = product[categ_field] if categ_field else product.browse([])
             category_id = str(pos_categs[0].id) if pos_categs else None
             has_image = bool(product.image_512)
             is_combo = product.type == 'combo'
@@ -529,6 +539,96 @@ class OrderConnectorController(http.Controller):
             return (cash or methods)[:1]
         return (non_cash or methods)[:1]
 
+    @staticmethod
+    def _localized(value, lang):
+        """Pick one language out of a localized value ({en,ar} dict)."""
+        if isinstance(value, dict):
+            return str(value.get(lang) or '')
+        return ''
+
+    def _addon_names_from_id(self, mod_id):
+        """Resolve an add-on's English & Arabic names from its Odoo source,
+        using Odoo's own translations so the option matches the UI language
+        (the same way the main product line does). The catalog exports add-on
+        ids as 'ptav-<id>' (a product attribute value) and combo items as
+        'comboitem-<id>'; a plain integer is treated as a product id.
+        Returns (en, ar) with '' when unresolved."""
+        mod_id = self._as_text(mod_id)
+        if not mod_id:
+            return '', ''
+        env = request.env
+        try:
+            m = re.match(r'^ptav-(\d+)$', mod_id)
+            if m:
+                rec = env['product.template.attribute.value'].sudo().browse(int(m.group(1)))
+                if rec.exists():
+                    return self._tr(rec, 'name', 'en_US'), self._tr(rec, 'name', 'ar_001')
+            m = re.match(r'^comboitem-(\d+)$', mod_id)
+            if m:
+                ci = env['product.combo.item'].sudo().browse(int(m.group(1)))
+                if ci.exists() and ci.product_id:
+                    return self._tr(ci.product_id, 'name', 'en_US'), self._tr(ci.product_id, 'name', 'ar_001')
+            if mod_id.isdigit():
+                prod = env['product.product'].sudo().browse(int(mod_id))
+                if prod.exists():
+                    return self._tr(prod, 'name', 'en_US'), self._tr(prod, 'name', 'ar_001')
+        except Exception:  # noqa: BLE001 - fall back to the order-supplied name
+            _logger.exception("Order Connector: could not resolve add-on name for %s", mod_id)
+        return '', ''
+
+    def _addon_product(self, name_value, mod_id=None):
+        """Find or create a POS service product for an order add-on / combo
+        option, so each selected option shows as its own order line.
+
+        The product is named in both English and Arabic so the order line
+        reads in the user's language, and carries NO internal reference so the
+        line shows a clean product name (not "[ORDER_ADDON_x]") — the backend
+        order list renders the product's display name, not the line label.
+
+        Names come from Odoo's own translations (resolved from the option id)
+        when available, so they localize even when the order only carried one
+        language; otherwise the order-supplied name is used."""
+        en_odoo, ar_odoo = self._addon_names_from_id(mod_id)
+        en = en_odoo or self._localized(name_value, 'en') or self._as_text(name_value)
+        ar = ar_odoo or self._localized(name_value, 'ar')
+        display = (en or ar or 'Add-on').strip()
+
+        Product = request.env['product.product'].sudo()
+        # Reuse our own add-on products (service / POS / no reference), matched
+        # by their English name. The default_code filter keeps us from touching
+        # real catalog products (which normally carry a reference).
+        prod = Product.with_context(lang='en_US').search([
+            ('name', '=', display),
+            ('type', '=', 'service'),
+            ('available_in_pos', '=', True),
+            ('sale_ok', '=', True),
+            ('purchase_ok', '=', False),
+            ('default_code', '=', False),
+        ], limit=1)
+        if not prod:
+            prod = Product.with_context(lang='en_US').create({
+                'name': display,
+                'type': 'service',
+                'sale_ok': True,
+                'purchase_ok': False,
+                'available_in_pos': True,
+                'taxes_id': [(6, 0, [])],
+                'list_price': 0.0,
+            })
+        if ar and ar != display:
+            try:
+                prod.with_context(lang='ar_001').write({'name': ar})
+            except Exception:  # noqa: BLE001 - translation is best-effort
+                _logger.exception("Order Connector: could not set Arabic add-on name")
+        return prod
+
+    def _tax_amounts(self, taxes, currency, partner, unit_price, qty, product=None):
+        """Return (subtotal_excl, subtotal_incl) for a line, applying `taxes`."""
+        if taxes:
+            res = taxes.compute_all(unit_price, currency, qty, product=product, partner=partner)
+            return res['total_excluded'], res['total_included']
+        return unit_price * qty, unit_price * qty
+
     def _build_pos_order(self, order, items, session):
         env = request.env
         ProductTemplate = env['product.template'].sudo()
@@ -560,18 +660,14 @@ class OrderConnectorController(http.Controller):
             # sent at all — `or` would wrongly treat 0 as missing.
             item_price = item.get('price')
             price = float(item_price) if item_price is not None else template.list_price
-            for modifier in item.get('modifiers') or []:
-                price += float(modifier.get('price') or 0) * float(modifier.get('qty') or 1)
 
             taxes = variant.taxes_id
             if taxes and company:
                 taxes = taxes.filtered(lambda t: t.company_id == company) or taxes
-            if taxes:
-                tax_res = taxes.compute_all(price, currency, qty, product=variant, partner=partner)
-                subtotal, subtotal_incl = tax_res['total_excluded'], tax_res['total_included']
-            else:
-                subtotal = subtotal_incl = price * qty
 
+            # Main product line at its own price (add-ons are their own lines
+            # below, not folded into this price).
+            subtotal, subtotal_incl = self._tax_amounts(taxes, currency, partner, price, qty, variant)
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
 
@@ -598,6 +694,29 @@ class OrderConnectorController(http.Controller):
             if line_note_field and line_note:
                 line_vals[line_note_field] = line_note
             lines.append((0, 0, line_vals))
+
+            # Selected add-ons / combo options as their own lines so they show
+            # in the order with their quantity and price. They carry the parent
+            # product's taxes, so the order total is unchanged versus folding
+            # the add-on price into the main line.
+            for modifier in item.get('modifiers') or []:
+                mod_price = float(modifier.get('price') or 0)
+                mod_qty = float(modifier.get('qty') or 1) * qty
+                mod_name_value = modifier.get('name')
+                mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
+                amount_total += mod_incl
+                amount_tax += mod_incl - mod_sub
+                addon = self._addon_product(mod_name_value, modifier.get('id'))
+                lines.append((0, 0, {
+                    'product_id': addon.id,
+                    'qty': mod_qty,
+                    'price_unit': mod_price,
+                    'price_subtotal': mod_sub,
+                    'price_subtotal_incl': mod_incl,
+                    'discount': 0.0,
+                    'tax_ids': [(6, 0, taxes.ids if taxes else [])],
+                    'full_product_name': self._as_text(mod_name_value) or addon.name,
+                }))
 
         if not lines:
             raise ValueError('No resolvable products in order.items')
