@@ -154,6 +154,11 @@ class OrderConnectorController(http.Controller):
             return None
         return config if config.exists() else None
 
+    def _pos_categ_field(self):
+        """POS-category field on product.template: `pos_categ_ids` (many2many)
+        on Odoo 17+, `pos_categ_id` (many2one) on Odoo 16."""
+        return self._first_field('product.template', ['pos_categ_ids', 'pos_categ_id'])
+
     def _config_category_ids(self, config):
         """The pos.category ids available at this branch, expanded to include
         child categories. Returns None when the branch does not restrict
@@ -176,7 +181,9 @@ class OrderConnectorController(http.Controller):
                 domain += ['|', ('company_id', '=', False), ('company_id', '=', company.id)]
             categ_ids = self._config_category_ids(config)
             if categ_ids is not None:
-                domain.append(('pos_categ_ids', 'in', categ_ids))
+                field = self._pos_categ_field()
+                if field:
+                    domain.append((field, 'in', categ_ids))
         return domain
 
     def _catalog_categories(self, config=None):
@@ -210,9 +217,12 @@ class OrderConnectorController(http.Controller):
     def _catalog_items(self, config=None):
         base = self._base_url()
         products = request.env['product.template'].sudo().search(self._product_domain(config))
+        categ_field = self._pos_categ_field()
         result = []
         for product in products:
-            pos_categs = product.pos_categ_ids
+            # pos_categ_ids (m2m, Odoo 17+) or pos_categ_id (m2o, Odoo 16);
+            # both index to the first category.
+            pos_categs = product[categ_field] if categ_field else product.browse([])
             category_id = str(pos_categs[0].id) if pos_categs else None
             has_image = bool(product.image_512)
             is_combo = product.type == 'combo'
