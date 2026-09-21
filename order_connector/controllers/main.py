@@ -3,8 +3,9 @@ import json
 import logging
 import re
 import html
+import uuid as uuid_lib
 
-from odoo import http, SUPERUSER_ID
+from odoo import http, SUPERUSER_ID, fields
 from odoo.http import request
 
 _logger = logging.getLogger(__name__)
@@ -540,6 +541,13 @@ class OrderConnectorController(http.Controller):
             components.append(('Discount', discount))
         return components
 
+    def _next_pos_sequence(self, session):
+        """Next per-session order sequence number (used to build a unique
+        pos_reference), mirroring how the POS numbers its own orders."""
+        last = request.env['pos.order'].sudo().search(
+            [('session_id', '=', session.id)], order='sequence_number desc', limit=1)
+        return (last.sequence_number or 0) + 1
+
     def _pos_payment_method(self, session, payment_type):
         """Pick the POS payment method matching the order's payment type:
         a cash method for offline/cash, otherwise a non-cash (card) method.
@@ -780,6 +788,13 @@ class OrderConnectorController(http.Controller):
             }))
             amount_total -= amount
 
+        PosOrder = env['pos.order']
+        # Odoo 18's POS frontend loads synced orders and calls
+        # `pos_reference.includes(...)`. An unset Char field comes back as
+        # `false` (not null), which `?.` does not guard, so the Orders/Refund
+        # screen white-screens. Always give the order a real pos_reference and
+        # sequence_number (and a uuid on 17+), like a real POS order.
+        seq = self._next_pos_sequence(session)
         pos_vals = {
             'session_id': session.id,
             'company_id': company.id,
@@ -790,9 +805,13 @@ class OrderConnectorController(http.Controller):
             'amount_total': amount_total,
             'amount_paid': 0.0,
             'amount_return': 0.0,
+            'sequence_number': seq,
+            'pos_reference': 'Order %05d-%03d-%04d' % (0, session.id, seq),
             'connector_managed': True,
             'connector_provider_order_id': order.get('provider_order_id') or '',
         }
+        if 'uuid' in PosOrder._fields:
+            pos_vals['uuid'] = str(uuid_lib.uuid4())
         order_note = self._as_text(order.get('note'))
         type_label = self._order_type_label(order.get('order_type'))
         if type_label:
@@ -804,21 +823,25 @@ class OrderConnectorController(http.Controller):
         if note_field and order_note:
             pos_vals[note_field] = order_note
 
-        pos_order = env['pos.order'].sudo().create(pos_vals)
+        pos_order = PosOrder.sudo().create(pos_vals)
 
-        # Register a payment so the order is marked paid (shows as a real order),
-        # matching the order's payment type (cash for offline, card otherwise).
+        # Register the payment via add_payment so amount_paid is actually
+        # updated and the order can be validated as paid. A bare
+        # pos.payment.create() does not update amount_paid on Odoo 18, so
+        # action_pos_order_paid() raised and the order stayed draft.
         method = self._pos_payment_method(session, order.get('payment_type'))
         if method:
             try:
-                env['pos.payment'].sudo().create({
+                pos_order.sudo().add_payment({
                     'pos_order_id': pos_order.id,
                     'amount': amount_total,
                     'payment_method_id': method.id,
+                    'payment_date': fields.Datetime.now(),
                 })
-                pos_order.action_pos_order_paid()
-            except Exception:  # noqa: BLE001 - keep the order even if it stays unpaid/draft
-                _logger.exception("Order Connector: could not mark pos order %s paid", pos_order.id)
+                if pos_order.state == 'draft':
+                    pos_order.action_pos_order_paid()
+            except Exception:  # noqa: BLE001 - the order still has a valid reference even if payment fails
+                _logger.exception("Order Connector: could not pay pos order %s", pos_order.id)
         else:
             _logger.warning("Order Connector: no POS payment method for config %s; order stays draft", config.id)
 
@@ -991,11 +1014,12 @@ class OrderConnectorController(http.Controller):
                 else:
                     order._action_cancel() if hasattr(order, '_action_cancel') else order.action_cancel()
             elif status in ('completed', 'delivered', 'done', 'picked_up'):
-                if is_pos and order.state not in ('done', 'invoiced'):
-                    if hasattr(order, 'action_pos_order_done'):
-                        order.action_pos_order_done()
-                    else:
-                        order.write({'state': 'done'})
+                # Only finalize an order that is actually paid. Forcing
+                # state='done' on an unpaid draft creates a "Posted" order with
+                # 0 paid and blocks the POS session from closing. The status is
+                # still recorded in the note above for unpaid orders.
+                if is_pos and order.state == 'paid' and hasattr(order, 'action_pos_order_done'):
+                    order.action_pos_order_done()
             elif status in ('confirmed', 'accepted') and not is_pos and order.state in ('draft', 'sent'):
                 order.action_confirm()
         except Exception:  # noqa: BLE001 - status is recorded in the note regardless
