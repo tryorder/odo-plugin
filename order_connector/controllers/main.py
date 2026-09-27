@@ -548,6 +548,18 @@ class OrderConnectorController(http.Controller):
             [('session_id', '=', session.id)], order='sequence_number desc', limit=1)
         return (last.sequence_number or 0) + 1
 
+    def _wallet_payment_method(self, session):
+        """A POS payment method dedicated to wallet balance, matched by name
+        (English or Arabic) among the session's methods. Returns None when the
+        merchant has no wallet method configured (the caller then falls back to
+        the order's normal method), so wallet is still a payment, not a line."""
+        methods = session.payment_method_ids or session.config_id.payment_method_ids
+        for m in methods:
+            name = (m.name or '')
+            if 'wallet' in name.lower() or 'محفظ' in name:
+                return m
+        return None
+
     def _pos_payment_method(self, session, payment_type):
         """Pick the POS payment method matching the order's payment type:
         a cash method for offline/cash, otherwise a non-cash (card) method.
@@ -825,24 +837,38 @@ class OrderConnectorController(http.Controller):
 
         pos_order = PosOrder.sudo().create(pos_vals)
 
-        # Register the payment via add_payment so amount_paid is actually
-        # updated and the order can be validated as paid. A bare
-        # pos.payment.create() does not update amount_paid on Odoo 18, so
-        # action_pos_order_paid() raised and the order stayed draft.
+        # Register the tender via add_payment so amount_paid is actually
+        # updated and the order can be validated as paid. The wallet balance is
+        # prepaid money, so it is recorded as its OWN payment (not a discount
+        # line) — a negative untaxed discount line corrupts the invoice tax
+        # base and gets the e-invoice rejected by ZATCA. The rest is paid on the
+        # order's payment method (cash for offline, card otherwise).
         method = self._pos_payment_method(session, order.get('payment_type'))
-        if method:
-            try:
+        wallet_amount = float(order.get('wallet_amount') or 0)
+        wallet_amount = min(wallet_amount, amount_total) if wallet_amount > 0 else 0.0
+        try:
+            if wallet_amount > 0:
+                wallet_method = self._wallet_payment_method(session) or method
+                if wallet_method:
+                    pos_order.sudo().add_payment({
+                        'pos_order_id': pos_order.id,
+                        'amount': wallet_amount,
+                        'payment_method_id': wallet_method.id,
+                        'payment_date': fields.Datetime.now(),
+                    })
+            remaining = amount_total - wallet_amount
+            if method and remaining > 0.005:
                 pos_order.sudo().add_payment({
                     'pos_order_id': pos_order.id,
-                    'amount': amount_total,
+                    'amount': remaining,
                     'payment_method_id': method.id,
                     'payment_date': fields.Datetime.now(),
                 })
-                if pos_order.state == 'draft':
-                    pos_order.action_pos_order_paid()
-            except Exception:  # noqa: BLE001 - the order still has a valid reference even if payment fails
-                _logger.exception("Order Connector: could not pay pos order %s", pos_order.id)
-        else:
+            if pos_order.state == 'draft' and pos_order.payment_ids:
+                pos_order.action_pos_order_paid()
+        except Exception:  # noqa: BLE001 - the order still has a valid reference even if payment fails
+            _logger.exception("Order Connector: could not pay pos order %s", pos_order.id)
+        if not method and wallet_amount <= 0:
             _logger.warning("Order Connector: no POS payment method for config %s; order stays draft", config.id)
 
         # A draft pos.order keeps Odoo's default name "/"; assign the config's
