@@ -827,15 +827,22 @@ class OrderConnectorController(http.Controller):
 
         pos_order = PosOrder.sudo().create(pos_vals)
 
-        # Register the tender via add_payment so amount_paid is actually
-        # updated and the order can be validated as paid. The wallet balance is
-        # prepaid money, so it is recorded as its OWN payment (not a discount
-        # line) — a negative untaxed discount line corrupts the invoice tax
-        # base and gets the e-invoice rejected by ZATCA. The rest is paid on the
-        # order's payment method (cash for offline, card otherwise).
+        # Register the tender via add_payment. The wallet balance is prepaid
+        # money and is always recorded as its OWN payment (never a discount line
+        # — a negative untaxed line breaks ZATCA e-invoicing).
+        #
+        # The rest of the tender depends on the payment type:
+        #   - online / prepaid: already collected by the platform -> record it
+        #     as paid and finalize the order.
+        #   - cash / offline (pay at pickup or on delivery): NOT collected yet ->
+        #     leave it for the cashier to settle in the POS. We do not auto-mark
+        #     it paid; it stays a valid (referenced) unpaid order so it does not
+        #     wrongly show as paid.
         method = self._pos_payment_method(session, order.get('payment_type'))
         wallet_amount = float(order.get('wallet_amount') or 0)
         wallet_amount = min(wallet_amount, amount_total) if wallet_amount > 0 else 0.0
+        is_cash = (order.get('payment_type') or '').lower() in (
+            'offline', 'cash', 'cod', 'cash_on_delivery')
         try:
             if wallet_amount > 0:
                 wallet_method = self._wallet_payment_method(session) or method
@@ -847,19 +854,22 @@ class OrderConnectorController(http.Controller):
                         'payment_date': fields.Datetime.now(),
                     })
             remaining = amount_total - wallet_amount
-            if method and remaining > 0.005:
+            # Record the remainder as paid only for prepaid (online) orders.
+            if method and remaining > 0.005 and not is_cash:
                 pos_order.sudo().add_payment({
                     'pos_order_id': pos_order.id,
                     'amount': remaining,
                     'payment_method_id': method.id,
                     'payment_date': fields.Datetime.now(),
                 })
-            if pos_order.state == 'draft' and pos_order.payment_ids:
+            # Finalize only when the order is actually fully paid (online, or
+            # fully covered by wallet). A cash order with an unpaid remainder
+            # stays draft for the cashier to settle.
+            paid = sum(pos_order.payment_ids.mapped('amount'))
+            if pos_order.state == 'draft' and pos_order.payment_ids and paid + 0.01 >= amount_total:
                 pos_order.action_pos_order_paid()
         except Exception:  # noqa: BLE001 - the order still has a valid reference even if payment fails
             _logger.exception("Order Connector: could not pay pos order %s", pos_order.id)
-        if not method and wallet_amount <= 0:
-            _logger.warning("Order Connector: no POS payment method for config %s; order stays draft", config.id)
 
         # A draft pos.order keeps Odoo's default name "/"; assign the config's
         # order-ref sequence so it has a proper reference.
