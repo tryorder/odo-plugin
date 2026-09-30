@@ -121,11 +121,17 @@ class OrderConnectorController(http.Controller):
         if auth:
             return auth
         params = request.env['ir.config_parameter'].sudo()
+        # installed_version reflects the manifest on disk, so after deploying a
+        # new build (and restarting) it shows the running code's version —
+        # lets the merchant verify which build is actually live.
+        module = request.env['ir.module.module'].sudo().search(
+            [('name', '=', 'order_connector')], limit=1)
         return self._json({
             'success': True,
             'tenant': params.get_param('order_connector.tenant'),
             'company': request.env.company.name,
             'version': '2.0',
+            'module_version': module.installed_version if module else None,
         })
 
     # ------------------------------------------------------------------ #
@@ -507,11 +513,22 @@ class OrderConnectorController(http.Controller):
             })
         return prod
 
+    @staticmethod
+    def _is_wallet_label(label):
+        """True for a wallet-balance component, in English or Arabic."""
+        text = (label or '').lower()
+        return 'wallet' in text or 'محفظ' in text
+
     def _discount_components(self, order):
-        """Normalize the order-level discounts into a list of
-        (label, amount) pairs. Prefers the itemized `discounts` breakdown
-        (coupon / wallet balance / loyalty points) so each shows as its own
-        line; falls back to the single aggregate `discount` for older callers."""
+        """Normalize the order-level DISCOUNTS (coupon, loyalty points, manual
+        discount) into (label, amount) pairs, each drawn as its own line.
+
+        Wallet balance is deliberately excluded: it is prepaid money, i.e. a
+        payment tender, and is recorded as a POS payment (see
+        _wallet_in_breakdown / the payment block), never as a negative untaxed
+        line — such a line corrupts the invoice tax base and ZATCA rejects the
+        e-invoice. The exclusion is done here so this module is safe even if an
+        older platform version still sends wallet inside `discounts`."""
         components = []
         breakdown = order.get('discounts')
         if isinstance(breakdown, (list, tuple)) and breakdown:
@@ -522,14 +539,29 @@ class OrderConnectorController(http.Controller):
                 if not amount:
                     continue
                 label = self._as_text(component.get('label')) or 'Discount'
+                if self._is_wallet_label(label):
+                    continue  # wallet -> payment, never a discount line
                 components.append((label, amount))
-            if components:
-                return components
+            # When a breakdown is sent it is authoritative: do not fall back to
+            # the aggregate `discount`, which older versions summed WITH wallet.
+            return components
 
         discount = float(order.get('discount') or 0)
         if discount:
             components.append(('Discount', discount))
         return components
+
+    def _wallet_in_breakdown(self, order):
+        """Wallet amount found inside the `discounts` breakdown (sent by older
+        platform versions). It is recorded as a payment, not a line."""
+        breakdown = order.get('discounts')
+        if not isinstance(breakdown, (list, tuple)):
+            return 0.0
+        total = 0.0
+        for component in breakdown:
+            if isinstance(component, dict) and self._is_wallet_label(self._as_text(component.get('label'))):
+                total += float(component.get('amount') or 0)
+        return total
 
     def _next_pos_sequence(self, session):
         """Next per-session order sequence number (used to build a unique
@@ -773,9 +805,9 @@ class OrderConnectorController(http.Controller):
             }))
             amount_total += delivery_fee
 
-        # Order-level discounts (coupon / wallet balance / loyalty points) each
-        # as its own labeled negative line so they are reflected in the order
-        # details and reduce the total.
+        # Order-level discounts (coupon / loyalty points / manual discount) each
+        # as its own labeled negative line. Wallet balance is NOT a discount and
+        # never appears here — it is recorded as a payment further below.
         for label, amount in self._discount_components(order):
             dpp = self._discount_product(label)
             lines.append((0, 0, {
@@ -839,7 +871,11 @@ class OrderConnectorController(http.Controller):
         #     it paid; it stays a valid (referenced) unpaid order so it does not
         #     wrongly show as paid.
         method = self._pos_payment_method(session, order.get('payment_type'))
-        wallet_amount = float(order.get('wallet_amount') or 0)
+        # Wallet comes as `wallet_amount` (current platform) or inside the
+        # `discounts` breakdown (older versions). Both describe the same prepaid
+        # money, so take the larger rather than summing (no double-count).
+        wallet_amount = max(float(order.get('wallet_amount') or 0),
+                            self._wallet_in_breakdown(order))
         wallet_amount = min(wallet_amount, amount_total) if wallet_amount > 0 else 0.0
         is_cash = (order.get('payment_type') or '').lower() in (
             'offline', 'cash', 'cod', 'cash_on_delivery')
