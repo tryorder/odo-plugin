@@ -409,20 +409,41 @@ class OrderConnectorController(http.Controller):
         if not config:
             return None
 
+        # A config allows only one non-closed session. It may be 'opened' or
+        # still in 'opening_control' (cashier launched the POS but has not
+        # confirmed the opening balance). Reuse it — trying to create another
+        # raises "Another session is already opened" and the order would fall
+        # back to a sale.order.
         session = env['pos.session'].sudo().search(
-            [('config_id', '=', config.id), ('state', '=', 'opened')],
+            [('config_id', '=', config.id), ('state', 'in', ('opening_control', 'opened'))],
             limit=1, order='id desc')
         if session:
-            return session
+            self._open_session(session)
+            return session if session.state == 'opened' else None
 
         try:
             session = env['pos.session'].sudo().create({'config_id': config.id, 'user_id': SUPERUSER_ID})
-            if session.state != 'opened':
-                session.action_pos_session_open()
+            self._open_session(session)
             return session if session.state == 'opened' else None
         except Exception:  # noqa: BLE001
             _logger.exception("Order Connector: could not open a POS session for config %s", config.id)
             return None
+
+    def _open_session(self, session):
+        """Move a session from 'opening_control' to 'opened'.
+
+        Up to Odoo 18, action_pos_session_open() does it. From Odoo 19 that
+        method only prepares the session and the actual opening is done by
+        set_opening_control(); call it with the expected opening balance so no
+        cash difference is recorded."""
+        if session.state == 'opened':
+            return
+        try:
+            session.action_pos_session_open()
+            if session.state != 'opened' and hasattr(session, 'set_opening_control'):
+                session.set_opening_control(session.cash_register_balance_start or 0.0, '')
+        except Exception:  # noqa: BLE001
+            _logger.exception("Order Connector: could not open POS session %s", session.id)
 
     @staticmethod
     def _order_type_label(order_type):
@@ -935,6 +956,8 @@ class OrderConnectorController(http.Controller):
         ProductTemplate = env['product.template'].sudo()
 
         partner = self._resolve_partner(order.get('customer') or {})
+        # sale.order.line taxes: `tax_ids` on Odoo 19, `tax_id` before.
+        tax_field = self._first_field('sale.order.line', ['tax_ids', 'tax_id']) or 'tax_id'
 
         order_lines = []
         for item in items:
@@ -985,7 +1008,7 @@ class OrderConnectorController(http.Controller):
                 'product_uom_qty': 1,
                 'price_unit': delivery_fee,
                 'name': dp.name,
-                'tax_id': [(6, 0, [])],
+                tax_field: [(6, 0, [])],
             }))
 
         # Order-level discounts (coupon / wallet balance / loyalty points) each
@@ -997,7 +1020,7 @@ class OrderConnectorController(http.Controller):
                 'product_uom_qty': 1,
                 'price_unit': -amount,
                 'name': dpp.name,
-                'tax_id': [(6, 0, [])],
+                tax_field: [(6, 0, [])],
             }))
 
         note_bits = []
@@ -1033,7 +1056,13 @@ class OrderConnectorController(http.Controller):
 
         partner = Partner.browse(False)
         if phone:
-            partner = Partner.search(['|', ('phone', '=', phone), ('mobile', '=', phone)], limit=1)
+            # res.partner.mobile was removed in Odoo 19 (phone only); match on
+            # mobile too only where the field still exists (16/17/18).
+            if 'mobile' in Partner._fields:
+                domain = ['|', ('phone', '=', phone), ('mobile', '=', phone)]
+            else:
+                domain = [('phone', '=', phone)]
+            partner = Partner.search(domain, limit=1)
         if not partner:
             partner = Partner.create({
                 'name': name,

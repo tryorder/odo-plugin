@@ -64,7 +64,7 @@
                 <separator/>
                 <filter name="success" string="Success" domain="[('success','=',True)]"/>
                 <filter name="failed" string="Failed" domain="[('success','=',False)]"/>
-                <group expand="0" string="Group By">
+                <group>
                     <filter name="group_direction" string="Direction" context="{'group_by':'direction'}"/>
                     <filter name="group_endpoint" string="Endpoint" context="{'group_by':'endpoint'}"/>
                     <filter name="group_status" string="Status" context="{'group_by':'status_code'}"/>
