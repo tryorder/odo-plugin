@@ -3,7 +3,7 @@
     'name': 'TryOrder',
     # Odoo Apps Store requires the version to be prefixed with the Odoo
     # series: <series>.<major>.<minor>.<patch>.<build>.
-    'version': '16.0.2.0.2',
+    'version': '16.0.2.0.3',
     'category': 'Sales/Point of Sale',
     'summary': 'Two-way POS integration between Odoo and the TryOrder ordering platform',
     'description': """
