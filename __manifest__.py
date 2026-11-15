@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'Order Connector',
-    'version': '2.0.2',
+    'version': '2.0.3',
     'category': 'Sales/Point of Sale',
     'summary': 'Two-way integration bridge between Odoo and the TryOrder platform',
     'description': """
