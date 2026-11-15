@@ -573,6 +573,73 @@ class OrderConnectorController(http.Controller):
                 total += float(component.get('amount') or 0)
         return total
 
+    @staticmethod
+    def _company_taxes(variant, company):
+        """The product's sales taxes for this company (all of them if none match)."""
+        taxes = variant.taxes_id
+        if taxes and company:
+            taxes = taxes.filtered(lambda t: t.company_id == company) or taxes
+        return taxes
+
+    def _taxed_discount_lines(self, order, bases, currency, partner):
+        """Turn the order-level discounts into lines that carry the taxes of the
+        lines they reduce, as Odoo's own global discount (pos_discount) does.
+
+        A negative line WITHOUT tax lowers the total but leaves the tax of the
+        products untouched, so the e-invoice's tax no longer equals 15% of its
+        taxable amount and ZATCA rejects it (BR-CO-17, BR-S-06, BR-S-09,
+        BR-KSA-84, BR-KSA-F-04). A negative line WITH the products' tax is what
+        l10n_sa_edi reports as a document-level allowance, and it lowers the
+        taxable amount and the tax together.
+
+        `bases` is a list of (taxes, amount incl. tax) for every product/add-on
+        line. Each discount is split over the tax groups in proportion to their
+        amount; whatever exceeds the products (e.g. a coupon also covering the
+        untaxed delivery fee) stays untaxed, like the delivery line.
+
+        Returns [(label, taxes, price_unit, subtotal, subtotal_incl)]."""
+        groups = {}
+        for taxes, gross in bases:
+            if gross <= 0:
+                continue
+            key = tuple(sorted(taxes.ids)) if taxes else ()
+            if key in groups:
+                groups[key][1] += gross
+            else:
+                groups[key] = [taxes, gross]
+        no_tax = request.env['account.tax'].browse()
+        result = []
+        for label, amount in self._discount_components(order):
+            capacity = sum(g[1] for g in groups.values())
+            covered = min(amount, capacity)
+            shares = []
+            left = covered
+            active = [g for g in groups.values() if g[1] > 0]
+            for i, group in enumerate(active):
+                if i == len(active) - 1:
+                    share = left
+                else:
+                    share = currency.round(covered * group[1] / capacity)
+                share = min(share, group[1])
+                if share > 0:
+                    shares.append((group[0], share))
+                    group[1] -= share
+                    left -= share
+            rest = amount - (covered - left)
+            if rest > 0.0001:
+                shares.append((no_tax, rest))
+            for taxes, share in shares:
+                price_unit = -share
+                if taxes:
+                    # A tax that is not included in the price adds itself on
+                    # top, so scale the unit price for the line to total -share.
+                    factor = taxes.compute_all(1.0, currency, 1, partner=partner)['total_included']
+                    if factor and abs(factor - 1.0) > 0.000001:
+                        price_unit = -share / factor
+                subtotal, subtotal_incl = self._tax_amounts(taxes, currency, partner, price_unit, 1)
+                result.append((label, taxes, price_unit, subtotal, subtotal_incl))
+        return result
+
     def _next_pos_sequence(self, session):
         """Next per-session order sequence number (used to build a unique
         pos_reference), mirroring how the POS numbers its own orders."""
@@ -720,6 +787,7 @@ class OrderConnectorController(http.Controller):
         amount_total = 0.0
         amount_tax = 0.0
         item_notes = []
+        discount_bases = []  # (taxes, amount incl. tax) of each product/add-on line
         for item in items:
             template_id = item.get('product_id')
             if not template_id:
@@ -748,6 +816,7 @@ class OrderConnectorController(http.Controller):
             subtotal, subtotal_incl = self._tax_amounts(taxes, currency, partner, price, qty, variant)
             amount_total += subtotal_incl
             amount_tax += subtotal_incl - subtotal
+            discount_bases.append((taxes, subtotal_incl))
 
             line_note = self._as_text(item.get('note')) if item.get('note') else ''
             display_name = self._as_text(item.get('name')) or variant.name
@@ -784,6 +853,7 @@ class OrderConnectorController(http.Controller):
                 mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
                 amount_total += mod_incl
                 amount_tax += mod_incl - mod_sub
+                discount_bases.append((taxes, mod_incl))
                 addon = self._addon_product(mod_name_value, modifier.get('id'))
                 lines.append((0, 0, {
                     'product_id': addon.id,
@@ -816,21 +886,25 @@ class OrderConnectorController(http.Controller):
             amount_total += delivery_fee
 
         # Order-level discounts (coupon / loyalty points / manual discount) each
-        # as its own labeled negative line. Wallet balance is NOT a discount and
-        # never appears here — it is recorded as a payment further below.
-        for label, amount in self._discount_components(order):
+        # as its own labeled negative line carrying the taxes of the products it
+        # reduces, so the tax goes down with the total (ZATCA). Wallet balance
+        # is NOT a discount and never appears here — it is recorded as a
+        # payment further below.
+        for label, taxes, price_unit, subtotal, subtotal_incl in self._taxed_discount_lines(
+                order, discount_bases, currency, partner):
             dpp = self._discount_product(label)
             lines.append((0, 0, {
                 'product_id': dpp.id,
                 'qty': 1,
-                'price_unit': -amount,
-                'price_subtotal': -amount,
-                'price_subtotal_incl': -amount,
+                'price_unit': price_unit,
+                'price_subtotal': subtotal,
+                'price_subtotal_incl': subtotal_incl,
                 'discount': 0.0,
-                'tax_ids': [(6, 0, [])],
+                'tax_ids': [(6, 0, taxes.ids)],
                 'full_product_name': dpp.name,
             }))
-            amount_total -= amount
+            amount_total += subtotal_incl
+            amount_tax += subtotal_incl - subtotal
 
         PosOrder = env['pos.order']
         # Odoo 18's POS frontend loads synced orders and calls
@@ -935,8 +1009,11 @@ class OrderConnectorController(http.Controller):
         ProductTemplate = env['product.template'].sudo()
 
         partner = self._resolve_partner(order.get('customer') or {})
+        company = env.company
+        currency = company.currency_id
 
         order_lines = []
+        discount_bases = []  # (taxes, amount incl. tax) of each product line
         for item in items:
             template_id = item.get('product_id')
             if not template_id:
@@ -972,6 +1049,9 @@ class OrderConnectorController(http.Controller):
                 'price_unit': price,
                 'name': '\n'.join(self._as_text(p) for p in name_parts if p),
             }))
+            taxes = self._company_taxes(variant, company)
+            discount_bases.append(
+                (taxes, self._tax_amounts(taxes, currency, partner, price, qty, variant)[1]))
 
         if not order_lines:
             raise ValueError('No resolvable products in order.items')
@@ -988,16 +1068,18 @@ class OrderConnectorController(http.Controller):
                 'tax_id': [(6, 0, [])],
             }))
 
-        # Order-level discounts (coupon / wallet balance / loyalty points) each
-        # as its own labeled negative line so they are reflected in the total.
-        for label, amount in self._discount_components(order):
+        # Order-level discounts (coupon / loyalty points / manual discount) each
+        # as its own labeled negative line carrying the taxes of the products it
+        # reduces, so the tax goes down with the total (ZATCA).
+        for label, taxes, price_unit, _sub, _incl in self._taxed_discount_lines(
+                order, discount_bases, currency, partner):
             dpp = self._discount_product(label)
             order_lines.append((0, 0, {
                 'product_id': dpp.id,
                 'product_uom_qty': 1,
-                'price_unit': -amount,
+                'price_unit': price_unit,
                 'name': dpp.name,
-                'tax_id': [(6, 0, [])],
+                'tax_id': [(6, 0, taxes.ids)],
             }))
 
         note_bits = []
