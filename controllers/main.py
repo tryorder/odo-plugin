@@ -239,14 +239,33 @@ class OrderConnectorController(http.Controller):
         base = (params.get_param('web.base.url') or '').strip() or request.httprequest.host_url
         return base.rstrip('/')
 
+    @staticmethod
+    def _gross_price(amount, taxes, currency=None, product=None):
+        """The price the customer pays for `amount`, VAT included.
+
+        Odoo's own price fields (list_price, price_extra, a combo item's
+        extra_price) hold the price *before* a tax that is not included in it —
+        the POS adds it at the till. The platform has one final price per
+        product and adds nothing, so exporting those fields raw sold the whole
+        menu VAT-free. A price-included tax (and a product with no tax at all)
+        is already the final price, and compute_all leaves it untouched.
+        """
+        amount = amount or 0.0
+        if not amount or not taxes:
+            return amount
+        return taxes.compute_all(amount, currency, 1, product=product)['total_included']
+
     def _catalog_items(self, config=None):
         base = self._base_url()
+        company = (config.company_id if config else False) or request.env.company
+        currency = (config.currency_id if config else False) or company.currency_id
         products = request.env['product.template'].sudo().search(self._product_domain(config))
         result = []
         for product in products:
             pos_categs = product.pos_categ_ids
             category_id = str(pos_categs[0].id) if pos_categs else None
             has_image = bool(product.image_512)
+            taxes = self._company_taxes(product, company)
             is_combo = product.type == 'combo'
             result.append({
                 '_id': str(product.id),
@@ -257,16 +276,17 @@ class OrderConnectorController(http.Controller):
                 'name_ar': self._tr_ar(product, 'name'),
                 'description_en': self._strip_html(self._tr(product, 'description_sale', 'en_US')),
                 'description_ar': self._strip_html(self._tr_ar(product, 'description_sale')),
-                'price': product.list_price,
+                'price': self._gross_price(
+                    product.list_price, taxes, currency, product.product_variant_id),
                 'category': category_id,
                 'is_disabled': not product.active,
                 'image_url': f"{base}/public/product/image/{product.id}" if has_image else None,
-                'add_on': self._catalog_addons(product),
-                'combos': self._catalog_combos(product) if is_combo else [],
+                'add_on': self._catalog_addons(product, taxes, currency),
+                'combos': self._catalog_combos(product, taxes, currency) if is_combo else [],
             })
         return result
 
-    def _catalog_combos(self, product):
+    def _catalog_combos(self, product, taxes=None, currency=None):
         """IPD-210: export Odoo combo groups/choices so combo options sync.
 
         Odoo combo product -> combo_ids (product.combo, the choice groups) ->
@@ -283,7 +303,8 @@ class OrderConnectorController(http.Controller):
                     'product_id': str(tmpl_id) if tmpl_id else None,
                     'name_en': self._tr(prod, 'name', 'en_US') if prod else '',
                     'name_ar': self._tr_ar(prod, 'name') if prod else '',
-                    'extra_price': getattr(ci, 'extra_price', 0.0) or 0.0,
+                    'extra_price': self._gross_price(
+                        getattr(ci, 'extra_price', 0.0) or 0.0, taxes, currency),
                 })
             combos.append({
                 'id': f"combo-{combo.id}",
@@ -293,18 +314,27 @@ class OrderConnectorController(http.Controller):
             })
         return combos
 
-    def _catalog_addons(self, product):
+    def _catalog_addons(self, product, taxes=None, currency=None):
         """Map Odoo product attributes -> modifier groups/options.
 
         Each attribute line becomes a modifier category; each of its values
         becomes a modifier (with price_extra as the option price).
+
+        The group is named per PRODUCT and attribute, not per attribute alone.
+        An attribute value (product.template.attribute.value) belongs to one
+        product and carries that product's own price_extra, so a group named
+        after the attribute collects one copy of "Large" per product that uses
+        it — and the platform shows a group's whole option list on every item
+        that links it, so the merchant sees each add-on repeated as many times
+        as there are products using the attribute.
         """
         add_on = []
         for line in product.attribute_line_ids:
             attribute = line.attribute_id
+            group_id = f"attr-{product.id}-{attribute.id}"
             category = {
-                '_id': f"attr-{attribute.id}",
-                'remoteId': f"attr-{attribute.id}",
+                '_id': group_id,
+                'remoteId': group_id,
                 'name_en': self._tr(attribute, 'name', 'en_US'),
                 'name_ar': self._tr_ar(attribute, 'name'),
                 'description_en': '',
@@ -322,8 +352,8 @@ class OrderConnectorController(http.Controller):
                         'remoteId': f"ptav-{ptav.id}",
                         'name_en': self._tr(ptav, 'name', 'en_US'),
                         'name_ar': self._tr_ar(ptav, 'name'),
-                        'price': ptav.price_extra,
-                        'category': f"attr-{attribute.id}",
+                        'price': self._gross_price(ptav.price_extra, taxes, currency),
+                        'category': group_id,
                     },
                 })
         return add_on
@@ -757,6 +787,21 @@ class OrderConnectorController(http.Controller):
                 _logger.exception("Order Connector: could not set Arabic add-on name")
         return prod
 
+    def _net_unit(self, gross, taxes, currency, partner=None, product=None):
+        """Turn the price the customer paid (VAT included) into a line's unit price.
+
+        The platform always sends what it charged, and it charges from a menu
+        that is now exported VAT-included (`_gross_price`). A tax that is not
+        included in the price adds itself on top of price_unit, so the unit
+        price has to be the amount before it — otherwise the order totals 15%
+        more than was collected, and an online order records that larger amount
+        as paid. A price-included tax (or none) needs nothing.
+        """
+        if not gross or not taxes:
+            return gross
+        factor = taxes.compute_all(1.0, currency, 1, product=product, partner=partner)['total_included']
+        return gross / factor if factor else gross
+
     def _tax_amounts(self, taxes, currency, partner, unit_price, qty, product=None):
         """Return (subtotal_excl, subtotal_incl) for a line, applying `taxes`."""
         if taxes:
@@ -794,12 +839,15 @@ class OrderConnectorController(http.Controller):
             # Use the price the platform sends, including 0 (e.g. a free-product
             # coupon). Only fall back to the Odoo list price when no price is
             # sent at all — `or` would wrongly treat 0 as missing.
-            item_price = item.get('price')
-            price = float(item_price) if item_price is not None else template.list_price
+            taxes = self._company_taxes(variant, company)
 
-            taxes = variant.taxes_id
-            if taxes and company:
-                taxes = taxes.filtered(lambda t: t.company_id == company) or taxes
+            item_price = item.get('price')
+            # A price the platform sends is VAT-included; Odoo's own list_price
+            # is already a unit price, so only the former is converted.
+            price = (
+                self._net_unit(float(item_price), taxes, currency, partner, variant)
+                if item_price is not None else template.list_price
+            )
 
             # Main product line at its own price (add-ons are their own lines
             # below, not folded into this price).
@@ -837,7 +885,8 @@ class OrderConnectorController(http.Controller):
             # product's taxes, so the order total is unchanged versus folding
             # the add-on price into the main line.
             for modifier in item.get('modifiers') or []:
-                mod_price = float(modifier.get('price') or 0)
+                mod_price = self._net_unit(
+                    float(modifier.get('price') or 0), taxes, currency, partner)
                 mod_qty = float(modifier.get('qty') or 1) * qty
                 mod_name_value = modifier.get('name')
                 mod_sub, mod_incl = self._tax_amounts(taxes, currency, partner, mod_price, mod_qty)
@@ -1020,15 +1069,22 @@ class OrderConnectorController(http.Controller):
             # Use the price the platform sends, including 0 (e.g. a free-product
             # coupon). Only fall back to the Odoo list price when no price is
             # sent at all — `or` would wrongly treat 0 as missing.
+            taxes = self._company_taxes(variant, company)
+
             item_price = item.get('price')
-            price = float(item_price) if item_price is not None else template.list_price
+            price = (
+                self._net_unit(float(item_price), taxes, currency, partner, variant)
+                if item_price is not None else template.list_price
+            )
 
             name_parts = [self._as_text(item.get('name')) or template.name]
             for modifier in item.get('modifiers') or []:
                 mod_name = self._as_text(modifier.get('name')) or modifier.get('id')
                 mod_price = float(modifier.get('price') or 0)
                 # Fold modifier prices into the line so the order total matches.
-                price += mod_price * float(modifier.get('qty') or 1)
+                # The label keeps the price the customer saw; the line carries
+                # the amount before a tax that is added on top of it.
+                price += self._net_unit(mod_price, taxes, currency, partner) * float(modifier.get('qty') or 1)
                 name_parts.append(f"+ {mod_name}" + (f" ({mod_price})" if mod_price else ''))
             if item.get('note'):
                 name_parts.append(str(item['note']))
@@ -1039,7 +1095,6 @@ class OrderConnectorController(http.Controller):
                 'price_unit': price,
                 'name': '\n'.join(self._as_text(p) for p in name_parts if p),
             }))
-            taxes = self._company_taxes(variant, company)
             discount_bases.append(
                 (taxes, self._tax_amounts(taxes, currency, partner, price, qty, variant)[1]))
 
